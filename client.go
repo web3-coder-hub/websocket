@@ -1,0 +1,281 @@
+package websocket
+
+import (
+	"encoding/json"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/web3-coder-hub/websocket/constant"
+
+	"github.com/antlabs/quickws"
+
+	"github.com/web3-coder-hub/logger"
+)
+
+// ClientState 客户端状态
+type ClientState int32
+
+const (
+	StateConnected ClientState = iota // 已连接
+	StateLoggedIn                     // 已登录
+	StateClosed                       // 已关闭
+)
+
+// Client 表示一个 WebSocket 客户端连接
+type Client struct {
+	// 连接标识
+	ID        string // 连接唯一ID
+	SessionId string // 会话ID（用于消息推送定位）
+
+	// 用户信息（登录后设置）
+	UserId     string   // 用户ID
+	AccountId  string   // 当前账户ID
+	AccountIds []string // 所有账户ID列表
+	ClientId   string   // 客户端ID
+	ClientType string   // 客户端类型（APP/WEB/BMS 等）
+	IsBmsLogin bool     // 是否 BMS 后台代操登录
+	RemoteAddr string   // 客户端远程地址（IP:Port）
+
+	// WebSocket 连接
+	conn *quickws.Conn
+
+	// Hub 引用
+	hub *Hub
+
+	// 消息发送通道
+	send chan []byte
+
+	// 关闭信号：用于 select 中安全退出
+	done chan struct{}
+
+	// 状态
+	state     atomic.Int32
+	closeOnce sync.Once
+
+	// 配置
+	writeWait time.Duration
+
+	// 日志
+	logger logger.Logger
+
+	// 心跳
+	heartbeatInterval time.Duration
+	heartbeatReset    chan struct{}
+	wsPath            string
+
+	// 认证缓存：握手阶段 Token 校验成功后写入，后续事件直接复用，避免重复 Redis 查询
+	AuthExpiry time.Time // JWT 过期时间，零值表示未经过 Token 认证（匿名连接）
+
+	// 连接时间
+	ConnectedAt time.Time
+	LastPingAt  time.Time
+}
+
+// NewClient 创建新的客户端实例
+func NewClient(id string, conn *quickws.Conn, hub *Hub, cfg HubConfig, l logger.Logger, heartbeatInterval time.Duration, wsPath string) *Client {
+	c := &Client{
+		ID:                id,
+		conn:              conn,
+		hub:               hub,
+		send:              make(chan []byte, cfg.SendBufferSize),
+		done:              make(chan struct{}),
+		ConnectedAt:       time.Now(),
+		writeWait:         cfg.WriteWait,
+		heartbeatInterval: heartbeatInterval,
+		heartbeatReset:    make(chan struct{}, 1),
+		wsPath:            wsPath,
+		logger:            l,
+	}
+	c.state.Store(int32(StateConnected))
+	return c
+}
+
+// IsLoggedIn 检查是否已登录
+func (c *Client) IsLoggedIn() bool {
+	return ClientState(c.state.Load()) == StateLoggedIn
+}
+
+// IsAuthValid 检查认证缓存是否有效（已认证且未过期）
+func (c *Client) IsAuthValid() bool {
+	return !c.AuthExpiry.IsZero() && time.Now().Before(c.AuthExpiry)
+}
+
+// IsClosed 检查连接是否已关闭
+func (c *Client) IsClosed() bool {
+	return ClientState(c.state.Load()) == StateClosed
+}
+
+// SetLoginInfo 设置登录信息
+func (c *Client) SetLoginInfo(userId, accountId string, accountIds []string, clientId, sessionId string, isBmsLogin bool) {
+	c.UserId = userId
+	c.AccountId = accountId
+	c.AccountIds = accountIds
+	c.ClientId = clientId
+	c.SessionId = sessionId
+	c.IsBmsLogin = isBmsLogin
+	c.state.Store(int32(StateLoggedIn))
+}
+
+// Send 发送消息到客户端（非阻塞）
+func (c *Client) Send(data []byte) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	select {
+	case c.send <- data:
+		return true
+	case <-c.done:
+		return false
+	default:
+		return false
+	}
+}
+
+// SendWithTimeout 发送消息，带超时
+func (c *Client) SendWithTimeout(data []byte, timeout time.Duration) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case c.send <- data:
+		return true
+	case <-c.done:
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+// SendBlocking 阻塞发送消息
+func (c *Client) SendBlocking(data []byte) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	select {
+	case c.send <- data:
+		return true
+	case <-c.done:
+		return false
+	}
+}
+
+// SendJSON 发送 JSON 消息
+func (c *Client) SendJSON(v interface{}) bool {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	return c.Send(data)
+}
+
+// SendSuccess 发送成功响应
+func (c *Client) SendSuccess(eventType, message string, data interface{}) bool {
+	return c.SendJSON(&Response{
+		Timestamp: time.Now(),
+		Message:   message,
+		Success:   true,
+		Data:      data,
+		Code:      0,
+		EventType: eventType,
+	})
+}
+
+// SendError 发送错误响应
+func (c *Client) SendError(eventType string, code int, message string) bool {
+	return c.SendJSON(&Response{
+		Timestamp: time.Now(),
+		Message:   message,
+		Success:   false,
+		Data:      nil,
+		Code:      code,
+		EventType: eventType,
+	})
+}
+
+// Close 关闭客户端连接
+func (c *Client) Close() {
+	c.closeOnce.Do(func() {
+		c.state.Store(int32(StateClosed))
+		close(c.done)
+		close(c.send)
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		if c.hub != nil {
+			c.hub.Unregister(c)
+		}
+	})
+}
+
+// ResetHeartbeat 重置心跳计时器（收到客户端 ping 时调用）
+func (c *Client) ResetHeartbeat() {
+	select {
+	case c.heartbeatReset <- struct{}{}:
+	default:
+	}
+}
+
+// HeartbeatPump 在客户端沉默超过心跳间隔时发送心跳 ping。
+// 收到客户端主动 ping 会重置计时器，避免重复发送。
+func (c *Client) HeartbeatPump() {
+	if c.heartbeatInterval <= 0 {
+		return
+	}
+	timer := time.NewTimer(c.heartbeatInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			now := time.Now()
+			msg := &PushMessage{
+				Channel:   constant.ChannelHeartbeat,
+				Timestamp: now,
+				Data: HeartbeatData{
+					Type:      constant.EventPing,
+					Path:      c.wsPath,
+					Timestamp: now.UnixMilli(),
+				},
+			}
+			if !c.SendJSON(msg) {
+				return
+			}
+			c.UpdateLastPing()
+			timer.Reset(c.heartbeatInterval)
+		case <-c.heartbeatReset:
+			c.UpdateLastPing()
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(c.heartbeatInterval)
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// WritePump 消息写入泵
+func (c *Client) WritePump() {
+	defer c.Close()
+	for message := range c.send {
+		if err := c.conn.WriteTimeout(quickws.Text, message, c.writeWait); err != nil {
+			return
+		}
+	}
+}
+
+// UpdateLastPing 更新最后心跳时间
+func (c *Client) UpdateLastPing() {
+	c.LastPingAt = time.Now()
+}
