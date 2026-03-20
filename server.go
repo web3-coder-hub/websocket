@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/web3-coder-hub/cache"
 	"github.com/web3-coder-hub/websocket/auth"
 	"github.com/web3-coder-hub/websocket/constant"
 
@@ -48,12 +49,14 @@ type Server struct {
 }
 
 // NewServer 创建 WebSocket 服务器
-func NewServer(cfg Config, hub *Hub, l logger.Logger) *Server {
+func NewServer(cfg Config, hub *Hub, cache cache.Cache, l logger.Logger) *Server {
+	authenticator := auth.NewAuthenticator(cache, cfg.MustLogin, l)
 	return &Server{
 		config:   cfg,
 		hub:      hub,
 		logger:   l,
 		handlers: make(map[string]MessageHandler),
+		auth:     authenticator,
 	}
 }
 
