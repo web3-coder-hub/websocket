@@ -482,15 +482,14 @@ func (h *Hub) CleanupInactive(timeout time.Duration) int {
 	count := 0
 	now := time.Now()
 	h.clients.Range(func(_ string, client *Client) bool {
-		if client.LastPingAt.IsZero() {
-			// 从未ping过，检查连接时间
+		lastPing := client.GetLastPingAt()
+		if lastPing.IsZero() {
 			if now.Sub(client.ConnectedAt) > timeout {
 				client.Close()
 				count++
 			}
 		} else {
-			// 检查最后ping时间
-			if now.Sub(client.LastPingAt) > timeout {
+			if now.Sub(lastPing) > timeout {
 				client.Close()
 				count++
 			}

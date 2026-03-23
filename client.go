@@ -69,7 +69,7 @@ type Client struct {
 
 	// 连接时间
 	ConnectedAt time.Time
-	LastPingAt  time.Time
+	lastPingAt  atomic.Int64 // Unix 纳秒时间戳
 }
 
 // NewClient 创建新的客户端实例
@@ -202,14 +202,19 @@ func (c *Client) SendError(eventType string, code int, message string) bool {
 }
 
 // Close 关闭客户端连接
+//
+// 关闭顺序：done → conn → send → hub.Unregister
+//   - 先关闭 done：通知 HeartbeatPump 退出，Send 系列方法立即返回 false
+//   - 再关闭 conn：使 WritePump 中正在进行的 WriteTimeout 立即失败并返回
+//   - 最后关闭 send：WritePump 已退出，安全关闭通道
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.state.Store(int32(StateClosed))
 		close(c.done)
-		close(c.send)
 		if c.conn != nil {
 			_ = c.conn.Close()
 		}
+		close(c.send)
 		if c.hub != nil {
 			c.hub.Unregister(c)
 		}
@@ -226,6 +231,8 @@ func (c *Client) ResetHeartbeat() {
 
 // HeartbeatPump 在客户端沉默超过心跳间隔时发送心跳 ping。
 // 收到客户端主动 ping 会重置计时器，避免重复发送。
+// 注意：心跳发送失败（如 send channel 拥塞）不应终止心跳泵，
+// 连接的生命周期由 done channel 控制（WritePump 检测到底层连接断开后触发 Close）。
 func (c *Client) HeartbeatPump() {
 	if c.heartbeatInterval <= 0 {
 		return
@@ -245,9 +252,7 @@ func (c *Client) HeartbeatPump() {
 					Timestamp: now.UnixMilli(),
 				},
 			}
-			if !c.SendJSON(msg) {
-				return
-			}
+			c.SendJSON(msg)
 			c.UpdateLastPing()
 			timer.Reset(c.heartbeatInterval)
 		case <-c.heartbeatReset:
@@ -277,5 +282,14 @@ func (c *Client) WritePump() {
 
 // UpdateLastPing 更新最后心跳时间
 func (c *Client) UpdateLastPing() {
-	c.LastPingAt = time.Now()
+	c.lastPingAt.Store(time.Now().UnixNano())
+}
+
+// GetLastPingAt 获取最后心跳时间
+func (c *Client) GetLastPingAt() time.Time {
+	ns := c.lastPingAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
