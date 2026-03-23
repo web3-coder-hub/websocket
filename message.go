@@ -72,7 +72,7 @@ type SubscribeEventData struct {
 // SubItem 订阅项
 type SubItem struct {
 	Channel    string `json:"channel"`              // 频道
-	Product    string `json:"product"`              // 产品代码
+	Symbol    string `json:"symbol"`              // 产品代码
 	TimeWindow string `json:"timeWindow,omitempty"` // 时间窗口（K线用）
 	OrderId    string `json:"orderId,omitempty"`    // 订单ID（订单浮动盈亏用）
 }
