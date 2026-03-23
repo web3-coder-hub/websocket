@@ -239,6 +239,10 @@ func (h *Hub) Unregister(client *Client) {
 func (h *Hub) addClient(client *Client) {
 	h.clients.Store(client.ID, client)
 
+	if client.SessionId != "" {
+		h.sessions.Store(client.SessionId, client)
+	}
+
 	if h.logger != nil {
 		h.logger.Info("client registered",
 			logger.Field{Key: "clientId", Value: client.ID},
