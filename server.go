@@ -91,8 +91,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc(s.config.Path, s.handleWebSocket)
 
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.config.Port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", s.config.Port),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // 防止 Slowloris 攻击
 	}
 
 	s.logger.Info("websocket server starting",

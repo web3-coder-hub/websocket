@@ -2,7 +2,7 @@ package auth
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -47,7 +47,7 @@ func NewAuthenticator(c cache.Cache, mustLogin bool, l logger.Logger) *Authentic
 
 // AuthResult 认证成功后返回的完整用户数据
 type AuthResult struct {
-	UserSessionId string    // MD5(clientType + "-" + clientId)
+	UserSessionId string    // SHA256(clientType + "-" + clientId)[:32]
 	UserId        string    // 用户ID，来自 Redis UserData
 	AccountId     string    // 账户ID，来自 Redis UserData
 	ClientId      string    // 客户端标识
@@ -114,7 +114,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*AuthResult, error) {
 			return nil, errTokenMissing
 		}
 		return &AuthResult{
-			UserSessionId: md5Hex(clientType + "-" + clientId),
+			UserSessionId: sha256Hex(clientType + "-" + clientId),
 			ClientId:      clientId,
 			ClientIp:      clientIp,
 			ClientType:    clientType,
@@ -132,7 +132,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*AuthResult, error) {
 	}
 
 	result := &AuthResult{
-		UserSessionId: md5Hex(clientType + "-" + clientId),
+		UserSessionId: sha256Hex(clientType + "-" + clientId),
 		UserId:        userId,
 		AccountId:     accountId,
 		ClientId:      clientId,
@@ -253,7 +253,7 @@ func extractToken(r *http.Request) string {
 }
 
 // extractClientId 从请求头或查询参数中提取 Client-ID，
-// 都未提供时通过 MD5(User-Agent + "|" + RemoteIP) 自动生成
+// 都未提供时通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成
 func extractClientId(r *http.Request) string {
 	if h := r.Header.Get(clientIDHeader); h != "" {
 		return h
@@ -263,7 +263,7 @@ func extractClientId(r *http.Request) string {
 	}
 
 	fingerprint := r.UserAgent() + "|" + extractRealIP(r)
-	return md5Hex(fingerprint)
+	return sha256Hex(fingerprint)
 }
 
 // extractParam 从请求头或查询参数中提取指定参数，都为空时返回 defaultVal
@@ -333,9 +333,11 @@ func parseJWT(token string) (*loginUser, int64, error) {
 
 //  工具函数
 
-// md5Hex 计算 MD5 并返回 32 位小写十六进制字符串
-func md5Hex(s string) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(s)))
+// sha256Hex 计算 SHA256 并返回前 32 位小写十六进制字符串（用于会话 ID 生成）
+// #nosec G401 - SHA256 用于非加密场景的会话 ID 生成，不需要更强的加密算法
+func sha256Hex(s string) string {
+	hash := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%x", hash)[:32]
 }
 
 // toString 将 interface{} 安全转为字符串（兼容 JSON 中数字/字符串类型）

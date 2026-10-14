@@ -55,11 +55,6 @@ func (sc *ShardedClients) getShard(key string) *ClientShard {
 	return sc.shards[fnv32a(key)&shardMask]
 }
 
-// getShardByIndex 根据索引获取分片
-func (sc *ShardedClients) getShardByIndex(idx int) *ClientShard {
-	return sc.shards[idx]
-}
-
 // Store 存储客户端
 func (sc *ShardedClients) Store(key string, client *Client) {
 	shard := sc.getShard(key)

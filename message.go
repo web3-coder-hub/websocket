@@ -7,11 +7,11 @@ import (
 
 // ClientMessage 客户端发送的消息结构
 type ClientMessage struct {
-	EventType string          `json:"eventType"`           // 事件类型
-	EventData json.RawMessage `json:"eventData"`           // 事件数据（延迟解析）
-	Token     string          `json:"token,omitempty"`     // JWT Token（LOGIN 事件必填）
-	Nonce     string          `json:"nonce,omitempty"`     // 签名随机数
-	Sign      string          `json:"sign,omitempty"`      // HMAC-SHA256 签名
+	EventType string          `json:"eventType"`       // 事件类型
+	EventData json.RawMessage `json:"eventData"`       // 事件数据（延迟解析）
+	Token     string          `json:"token,omitempty"` // JWT Token（LOGIN 事件必填）
+	Nonce     string          `json:"nonce,omitempty"` // 签名随机数
+	Sign      string          `json:"sign,omitempty"`  // HMAC-SHA256 签名
 }
 
 // Response 服务端通用响应消息
@@ -72,7 +72,7 @@ type SubscribeEventData struct {
 // SubItem 订阅项
 type SubItem struct {
 	Channel    string `json:"channel"`              // 频道
-	Symbol    string `json:"symbol"`              // 产品代码
+	Symbol     string `json:"symbol"`               // 产品代码
 	TimeWindow string `json:"timeWindow,omitempty"` // 时间窗口（K线用）
 	OrderId    string `json:"orderId,omitempty"`    // 订单ID（订单浮动盈亏用）
 }
@@ -105,9 +105,9 @@ type LimitOrderEventData struct {
 
 // LimitOrderCancelEventData 取消挂单事件数据
 type LimitOrderCancelEventData struct {
-	OrdLimitId string `json:"ordLimitId"`             // 挂单ID
-	Language   string `json:"language,omitempty"`     // 语言代码
-	TradeToken string `json:"tradeToken,omitempty"`   // BMS 交易令牌
+	OrdLimitId string `json:"ordLimitId"`           // 挂单ID
+	Language   string `json:"language,omitempty"`   // 语言代码
+	TradeToken string `json:"tradeToken,omitempty"` // BMS 交易令牌
 }
 
 const (
