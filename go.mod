@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/antlabs/quickws v0.2.2
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/web3-coder-hub/cache v1.0.1
 	github.com/web3-coder-hub/logger v1.0.1
 )
