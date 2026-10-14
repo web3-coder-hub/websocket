@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: '1.26.1'
+
+jobs:
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Configure private modules
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          GIT_REPO: ${{ secrets.GIT_REPO }}
+        run: |
+          git config --global url."https://${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GOPRIVATE=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
+          echo "GONOPROXY=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
+          echo "GONOSUMDB=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.14.0
+
+      - name: Run quality checks
+        run: |
+          echo "🔍 Running full quality checks..."
+          echo ""
+          make check
+
+
+      - name: Collect and upload coverage
+        run: |
+          echo "📊 Collecting test coverage..."
+          go test -coverprofile=coverage.out -covermode=atomic ./...
+          echo "Test coverage summary:"
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 7
+
+      - name: Verify build
+        run: |
+          echo "🔨 Verifying build..."
+          make build
+          echo "✅ Build verification passed"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-build-${{ github.event.pull_request.number }}
+          path: bin/venues-connector
+          retention-days: 7
+
+      - name: Quality gate summary
+        if: success()
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🎉 Quality gates passed!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "✅ All quality checks passed"
+          echo "✅ Test coverage collected"
+          echo "✅ Build verification passed"
+          echo ""
+          echo "This PR is ready to merge."

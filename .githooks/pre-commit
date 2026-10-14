@@ -1,0 +1,110 @@
+#!/bin/bash
+set -eo pipefail
+
+echo "🔍 Running pre-commit quality checks..."
+echo ""
+
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    echo "⏭️  Merge commit detected, skipping quality checks"
+    exit 0
+fi
+
+STAGED_GO_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+
+if [ -z "$STAGED_GO_FILES" ]; then
+    echo "✅ No Go files to check"
+    exit 0
+fi
+
+echo "📝 Staged Go files:"
+echo "$STAGED_GO_FILES" | sed 's/^/  - /'
+echo ""
+
+
+CHECKS_FAILED=0
+
+echo "1️⃣  Checking code format (gofmt)..."
+UNFORMATTED=$(echo "$STAGED_GO_FILES" | xargs gofmt -l 2>&1 || true)
+if [ -n "$UNFORMATTED" ]; then
+    echo "❌ The following files are not formatted correctly:"
+    echo "$UNFORMATTED" | sed 's/^/     /'
+    echo ""
+    echo "   Fix with: make fmt"
+    CHECKS_FAILED=1
+else
+    echo "   ✅ Code format check passed"
+fi
+echo ""
+
+
+echo "2️⃣  Checking import organization (goimports)..."
+if command -v goimports >/dev/null 2>&1; then
+    WRONG_IMPORTS=$(echo "$STAGED_GO_FILES" | xargs goimports -l 2>&1 || true)
+    if [ -n "$WRONG_IMPORTS" ]; then
+        echo "❌ The following files have incorrect import statements:"
+        echo "$WRONG_IMPORTS" | sed 's/^/     /'
+        echo ""
+        echo "   Fix with: make fmt"
+        CHECKS_FAILED=1
+    else
+        echo "   ✅ Import statement check passed"
+    fi
+else
+    echo "   ⚠️  goimports not installed, skipping import check"
+    echo "   Install with: go install golang.org/x/tools/cmd/goimports@latest"
+fi
+echo ""
+
+
+echo "3️⃣  Running static analysis (go vet)..."
+
+PACKAGES=$(echo "$STAGED_GO_FILES" | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|' || echo "")
+if [ -z "$PACKAGES" ]; then
+    echo "   ⚠️  No packages to check"
+else
+    if echo "$PACKAGES" | xargs go vet 2>&1; then
+        echo "   ✅ Static analysis passed"
+    else
+        echo "❌ go vet found issues"
+        CHECKS_FAILED=1
+    fi
+fi
+echo ""
+
+
+echo "4️⃣  Running unit tests for affected packages..."
+
+if [ -z "$PACKAGES" ]; then
+    echo "   ⚠️  No packages to test"
+else
+    if echo "$PACKAGES" | xargs go test -short -timeout=30s >/dev/null 2>&1; then
+        echo "   ✅ Unit tests passed"
+    else
+        echo "❌ Unit tests failed"
+        echo ""
+        echo "   For detailed output run: go test -v ./..."
+        CHECKS_FAILED=1
+    fi
+fi
+echo ""
+
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if [ $CHECKS_FAILED -eq 0 ]; then
+    echo "✅ All pre-commit checks passed!"
+    echo ""
+    echo "Note: Full quality gates (including golangci-lint and race detection)"
+    echo "will run on GitHub when you create a Pull Request."
+    exit 0
+else
+    echo "❌ Pre-commit checks failed!"
+    echo ""
+    echo "Please fix the issues above before committing."
+    echo ""
+    echo "To skip this hook (not recommended):"
+    echo "  git commit --no-verify"
+    echo ""
+    echo "To run full quality checks:"
+    echo "  make check"
+    exit 1
+fi

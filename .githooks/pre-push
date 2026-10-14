@@ -1,0 +1,51 @@
+#!/bin/bash
+set -eo pipefail
+
+echo "🚀 Running pre-push quality gates..."
+echo ""
+
+remote="$1"
+url="$2"
+
+
+if [ -t 0 ]; then
+    echo "✅ No refs to push"
+    exit 0
+fi
+
+
+while read local_ref local_sha remote_ref remote_sha
+do
+    if [[ "$remote_ref" == "refs/heads/main" ]] || [[ "$remote_ref" == "refs/heads/develop" ]]; then
+        branch_name=$(echo "$remote_ref" | sed 's/refs\/heads\///')
+        echo "⚠️  Detected push to $branch_name branch!"
+        echo ""
+        echo "Running full quality checks..."
+        echo ""
+        echo "Checks include:"
+        echo "  1. Code format check"
+        echo "  2. Static analysis (go vet)"
+        echo "  3. Code style check (golangci-lint)"
+        echo "  4. All unit tests"
+        echo "  5. Race condition detection"
+        echo ""
+
+        if make check; then
+            echo ""
+            echo "✅ Quality gates passed! Safe to push to $branch_name branch."
+            exit 0
+        else
+            echo ""
+            echo "❌ Quality gates failed!"
+            echo ""
+            echo "Please fix these issues before pushing to $branch_name branch."
+            echo ""
+            echo "To skip this hook (not recommended):"
+            echo "  git push --no-verify"
+            exit 1
+        fi
+    fi
+done
+
+echo "✅ Pre-push checks passed"
+exit 0
