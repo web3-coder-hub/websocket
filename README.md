@@ -1,12 +1,14 @@
-# WebSocket Server
+# WebSocket Library
 
 [中文文档](./README_CN.md) | English
 
-A high-performance, production-ready WebSocket server implementation in Go, designed for real-time messaging with advanced features including authentication, message routing, and scalable client management.
+A high-performance, production-ready WebSocket library in Go with both server and client implementations. Features pluggable adapter architecture supporting multiple WebSocket libraries, authentication, message routing, auto-reconnection, and scalable connection management.
 
 ## Features
 
 ### Core Capabilities
+
+#### Server Features
 - **High-Performance Architecture**: Sharded client management using FNV-1a hashing for minimal lock contention
 - **Flexible Authentication**: JWT-based authentication with Redis cache integration and optional anonymous connections
 - **Message Security**: HMAC-SHA256 signature verification for message integrity
@@ -14,7 +16,16 @@ A high-performance, production-ready WebSocket server implementation in Go, desi
 - **Heartbeat Management**: Automatic ping/pong with configurable intervals
 - **Graceful Shutdown**: Clean connection closure and resource cleanup
 
+#### Client Features
+- **Auto Reconnection**: Configurable retry intervals and maximum attempts
+- **Heartbeat Detection**: Automatic ping/pong health monitoring
+- **Event-Driven**: OnConnect, OnDisconnect, OnError callbacks
+- **Message Routing**: Event-based message handler registration
+- **Session Management**: Automatic session ID tracking
+- **Thread-Safe**: Safe for concurrent use
+
 ### Advanced Features
+- **Pluggable Adapters**: Support multiple WebSocket libraries (QuickWS, Gorilla, etc.) through unified adapter interface
 - **Sharded Client Storage**: 32-shard concurrent map reduces lock contention in high-load scenarios
 - **Flexible Message Routing**: Send messages to specific users, accounts, sessions, or broadcast to all
 - **Authentication Caching**: Cache authentication info after JWT validation during handshake to avoid redundant Redis queries
@@ -24,7 +35,24 @@ A high-performance, production-ready WebSocket server implementation in Go, desi
 
 ## Architecture
 
-### Components
+### Adapter Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Application Layer (Server/Client)              │
+├─────────────────────────────────────────────────────────────┤
+│                   Adapter Interface Layer                    │
+├─────────────────────────────────────────────────────────────┤
+│  QuickWS Adapter  │  Gorilla Adapter  │  Custom Adapters   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The library uses a pluggable adapter pattern that allows you to:
+- Switch WebSocket libraries without changing application code
+- Support multiple libraries simultaneously
+- Add custom adapters for specialized requirements
+
+### Server Components
 
 #### Hub
 Central connection manager that maintains:
@@ -33,8 +61,8 @@ Central connection manager that maintains:
 - User and account mappings supporting one-to-many relationships
 - Registration/unregistration channels for thread-safe client lifecycle management
 
-#### Client
-Represents individual WebSocket connections with:
+#### Server Connection (Server-side Client)
+Represents individual WebSocket connections on the server:
 - Unique connection ID and session ID
 - User identity (userId, accountId, accountIds)
 - Client metadata (clientType, clientId, remoteAddr)
@@ -57,6 +85,21 @@ Connection-level authentication supporting:
 - Client fingerprinting for anonymous connections
 - Token expiry tracking and refresh prompting
 
+### Client Components
+
+#### WebSocket Client
+Full-featured WebSocket client with:
+- Automatic reconnection with exponential backoff support
+- Heartbeat monitoring and timeout detection
+- Event-driven message handling
+- Connection state management
+- Thread-safe message sending
+
+#### Adapters
+- **QuickWS Adapter**: High-performance default adapter
+- **Gorilla Adapter**: Popular community library support
+- **Custom Adapters**: Easy to implement for any WebSocket library
+
 ## Installation
 
 ```bash
@@ -64,6 +107,8 @@ go get github.com/web3-coder-hub/websocket
 ```
 
 ## Quick Start
+
+### Server Example
 
 ```go
 package main
@@ -80,10 +125,10 @@ import (
 
 func main() {
     // Initialize logger
-    l := logger.NewLogger()
+    l, _ := logger.New("websocket-server", nil)
     
-    // Initialize cache (Redis)
-    c := cache.NewCache(/* cache config */)
+    // Initialize cache
+    c, _ := cache.NewBigCache(100, 10*time.Minute)
     
     // Configure hub
     hubConfig := websocket.HubConfig{
@@ -104,8 +149,8 @@ func main() {
         Path:                  "/ws",
         SessionTimeoutSeconds: 3600,
         HeartbeatIntervalSecs: 30,
-        MustLogin:             false, // Allow anonymous connections
-        EnableSecurity:        true,  // Enable HMAC signature verification
+        MustLogin:             false,
+        EnableSecurity:        true,
         SecuritySecret:        "your-secret-key",
     }
     
@@ -115,7 +160,6 @@ func main() {
     // Register message handlers
     server.RegisterHandler("login", handleLogin)
     server.RegisterHandler("subscribe", handleSubscribe)
-    server.RegisterHandler("message", handleMessage)
     
     // Set disconnect handler
     server.SetDisconnectHandler(func(client *websocket.Client) {
@@ -127,57 +171,162 @@ func main() {
         log.Fatal(err)
     }
     
-    // Wait for shutdown signal
-    // ... shutdown logic ...
-    
     // Graceful shutdown
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    server.Stop(ctx)
-    hub.Stop()
+    // ...
 }
 
 func handleLogin(client *websocket.Client, msg *websocket.ClientMessage) error {
-    var data websocket.LoginEventData
-    if err := json.Unmarshal(msg.EventData, &data); err != nil {
-        client.SendError("login", websocket.ErrCodeParamInvalid, "Invalid login data")
-        return err
-    }
-    
-    // Register login information
-    client.hub.RegisterLogin(
-        client,
-        data.UserId,
-        data.AccountId,
-        []string{data.AccountId},
-        data.ClientId,
-        data.UserSessionId,
-        false,
-    )
-    
+    // Handle login
     client.SendSuccess("login", "Login successful", nil)
     return nil
 }
 
 func handleSubscribe(client *websocket.Client, msg *websocket.ClientMessage) error {
-    var data websocket.SubscribeEventData
-    if err := json.Unmarshal(msg.EventData, &data); err != nil {
-        client.SendError("subscribe", websocket.ErrCodeParamInvalid, "Invalid subscribe data")
-        return err
-    }
-    
-    // Handle subscription logic
-    // ...
-    
+    // Handle subscription
     client.SendSuccess("subscribe", "Subscribed successfully", nil)
     return nil
 }
+```
 
-func handleMessage(client *websocket.Client, msg *websocket.ClientMessage) error {
-    // Handle custom message
-    return nil
+### Client Example
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    
+    "github.com/web3-coder-hub/logger"
+    "github.com/web3-coder-hub/websocket/adapter/quickws"
+    "github.com/web3-coder-hub/websocket/client"
+)
+
+func main() {
+    // Create logger
+    l, _ := logger.New("websocket-client", nil)
+    
+    // Configure client
+    cfg := client.Config{
+        URL: "ws://localhost:8080/ws",
+        Headers: map[string]string{
+            "Access-Token": "your-jwt-token",
+            "Client-ID":    "client-001",
+            "Client-Type":  "APP",
+        },
+        ReconnectEnabled:     true,
+        ReconnectInterval:    5 * time.Second,
+        MaxReconnectAttempts: 10,
+        HeartbeatInterval:    30 * time.Second,
+        HeartbeatTimeout:     10 * time.Second,
+        EnableAutoHeartbeat:  true,
+    }
+    
+    // Create adapter (QuickWS)
+    adapter := quickws.NewClientAdapter()
+    
+    // Create client
+    c := client.NewClient(cfg, adapter, l)
+    
+    // Register event handlers
+    c.OnConnect(func() {
+        log.Println("Connected to server")
+        
+        // Send login message
+        loginData := map[string]interface{}{
+            "userId":        "user123",
+            "accountId":     "acc456",
+            "userSessionId": "session-001",
+        }
+        c.Send("login", loginData)
+    })
+    
+    c.OnDisconnect(func() {
+        log.Println("Disconnected from server")
+    })
+    
+    c.OnError(func(err error) {
+        log.Printf("Error: %v", err)
+    })
+    
+    // Register message handlers
+    c.RegisterHandler("login", func(msg *client.Message) error {
+        log.Printf("Login response: %s", msg.Message)
+        
+        // Subscribe to data
+        subscribeData := map[string]interface{}{
+            "subList": []map[string]string{
+                {"channel": "quote", "symbol": "BTCUSDT"},
+            },
+        }
+        return c.Send("subscribe", subscribeData)
+    })
+    
+    c.RegisterHandler("subscribe", func(msg *client.Message) error {
+        log.Printf("Subscribe response: %s", msg.Message)
+        return nil
+    })
+    
+    // Connect to server
+    if err := c.Connect(); err != nil {
+        log.Fatal(err)
+    }
+    
+    // Keep running
+    select {}
 }
 ```
+
+See [examples/](./examples/) for complete working examples.
+
+## Adapter Support
+
+### Switching Between Adapters
+
+The library supports multiple WebSocket implementations through adapters:
+
+**Using QuickWS (Default):**
+```go
+import "github.com/web3-coder-hub/websocket/adapter/quickws"
+
+adapter := quickws.NewClientAdapter()
+client := client.NewClient(config, adapter, logger)
+```
+
+**Using Gorilla WebSocket:**
+```go
+import (
+    "github.com/gorilla/websocket"
+    gorillaAdapter "github.com/web3-coder-hub/websocket/adapter/gorilla"
+)
+
+dialer := &websocket.Dialer{
+    HandshakeTimeout: 45 * time.Second,
+}
+adapter := gorillaAdapter.NewClientAdapter(dialer)
+client := client.NewClient(config, adapter, logger)
+```
+
+### Creating Custom Adapters
+
+Implement the `ClientAdapter` interface to support any WebSocket library:
+
+```go
+type ClientAdapter interface {
+    Dial(url string, headers http.Header, callback ClientCallback) (ClientConn, error)
+    Name() string
+}
+
+type ClientConn interface {
+    Write(op Opcode, data []byte) error
+    WriteTimeout(op Opcode, data []byte, timeout time.Duration) error
+    Close() error
+    ReadMessage() (Opcode, []byte, error)
+    IsConnected() bool
+}
+```
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed adapter implementation guide.
 
 ## Message Format
 
@@ -414,25 +563,41 @@ type Config struct {
 
 ## Dependencies
 
-- [antlabs/quickws](https://github.com/antlabs/quickws) - High-performance WebSocket library
+- [antlabs/quickws](https://github.com/antlabs/quickws) - High-performance WebSocket library (default adapter)
+- [gorilla/websocket](https://github.com/gorilla/websocket) - Alternative WebSocket library (optional)
 - [google/uuid](https://github.com/google/uuid) - UUID generation
 - [web3-coder-hub/cache](https://github.com/web3-coder-hub/cache) - Cache abstraction (Redis/Memory/BadgerDB)
 - [web3-coder-hub/logger](https://github.com/web3-coder-hub/logger) - Structured logging
 
 ## Performance Characteristics
 
+### Server
 - **Sharding**: 32 shards minimize lock contention in high-concurrency scenarios
 - **Non-blocking Sends**: Default send operations are non-blocking with channel buffering
 - **Connection Pooling**: Efficient goroutine-per-connection model
 - **Memory Efficiency**: Atomic operations for frequently-read state
 
+### Client
+- **Automatic Reconnection**: Configurable backoff and retry strategies
+- **Heartbeat Monitoring**: Proactive connection health checks
+- **Event-Driven**: Minimal overhead with callback-based architecture
+- **Thread-Safe**: Concurrent-safe message sending
+
 ## Best Practices
 
+### Server
 1. **Buffer Sizing**: Set `SendBufferSize` based on message frequency to avoid dropped messages
 2. **Heartbeat Tuning**: Keep `PingPeriod < PongWait` to prevent false disconnections
 3. **Token Refresh**: Prompt clients to re-login before token expiry
 4. **Graceful Shutdown**: Always call `Stop()` on hub and server to close connections cleanly
 5. **Error Handling**: Register disconnect handlers to clean up external resources
+
+### Client
+1. **Reconnection Strategy**: Configure `MaxReconnectAttempts` and `ReconnectInterval` based on your use case
+2. **Heartbeat Settings**: Set `HeartbeatTimeout > HeartbeatInterval` to avoid false timeouts
+3. **Message Handlers**: Keep handlers lightweight; use goroutines for heavy processing
+4. **Resource Cleanup**: Always call `Close()` when done
+5. **Error Recovery**: Implement `OnError` and `OnDisconnect` handlers for graceful degradation
 
 ## License
 

@@ -1,12 +1,14 @@
-# WebSocket 服务器
+# WebSocket 库
 
 [English](./README.md) | 中文文档
 
-一个高性能、生产就绪的 Go 语言 WebSocket 服务器实现，专为实时消息传输设计，具有身份认证、消息路由和可扩展客户端管理等高级特性。
+一个高性能、生产就绪的 Go 语言 WebSocket 库，提供服务端和客户端实现。具有可插拔的适配器架构，支持多种 WebSocket 库、身份认证、消息路由、自动重连和可扩展的连接管理等特性。
 
 ## 功能特性
 
 ### 核心能力
+
+#### 服务端特性
 - **高性能架构**：使用 FNV-1a 哈希的分片客户端管理，最小化锁竞争
 - **灵活的身份认证**：基于 JWT 的认证，集成 Redis 缓存，支持匿名连接
 - **消息安全**：HMAC-SHA256 签名验证确保消息完整性
@@ -14,7 +16,16 @@
 - **心跳管理**：自动 ping/pong 机制，可配置心跳间隔
 - **优雅关闭**：清理连接关闭和资源释放
 
+#### 客户端特性
+- **自动重连**：可配置重试间隔和最大尝试次数
+- **心跳检测**：自动 ping/pong 健康监控
+- **事件驱动**：OnConnect、OnDisconnect、OnError 回调
+- **消息路由**：基于事件的消息处理器注册
+- **会话管理**：自动会话 ID 跟踪
+- **线程安全**：支持并发使用
+
 ### 高级特性
+- **可插拔适配器**：通过统一适配器接口支持多种 WebSocket 库（QuickWS、Gorilla 等）
 - **分片客户端存储**：32 分片并发映射减少高负载场景下的锁竞争
 - **灵活的消息路由**：向特定用户、账户、会话发送消息或广播给所有人
 - **身份认证缓存**：握手阶段 JWT 验证后缓存认证信息，避免重复 Redis 查询
@@ -24,7 +35,24 @@
 
 ## 架构设计
 
-### 核心组件
+### 适配器架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              应用层 (服务端/客户端)                           │
+├─────────────────────────────────────────────────────────────┤
+│                     适配器接口层                              │
+├─────────────────────────────────────────────────────────────┤
+│  QuickWS 适配器  │  Gorilla 适配器  │  自定义适配器        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+库使用可插拔的适配器模式，可以：
+- 在不改变应用代码的情况下切换 WebSocket 库
+- 同时支持多个库
+- 为特殊需求添加自定义适配器
+
+### 服务端组件
 
 #### Hub（中心管理器）
 维护所有连接的中心管理器：
@@ -33,8 +61,8 @@
 - 用户和账户映射，支持一对多关系
 - 注册/注销通道，实现线程安全的客户端生命周期管理
 
-#### Client（客户端）
-表示单个 WebSocket 连接：
+#### Server Connection（服务端客户端）
+表示服务端的单个 WebSocket 连接：
 - 唯一的连接 ID 和会话 ID
 - 用户身份信息（userId、accountId、accountIds）
 - 客户端元数据（clientType、clientId、remoteAddr）
@@ -57,6 +85,21 @@
 - 匿名连接的客户端指纹识别
 - Token 过期追踪和刷新提示
 
+### 客户端组件
+
+#### WebSocket 客户端
+功能完善的 WebSocket 客户端：
+- 支持指数退避的自动重连
+- 心跳监控和超时检测
+- 事件驱动的消息处理
+- 连接状态管理
+- 线程安全的消息发送
+
+#### 适配器
+- **QuickWS 适配器**：高性能默认适配器
+- **Gorilla 适配器**：支持流行的社区库
+- **自定义适配器**：易于为任何 WebSocket 库实现
+
 ## 安装
 
 ```bash
@@ -64,6 +107,8 @@ go get github.com/web3-coder-hub/websocket
 ```
 
 ## 快速开始
+
+### 服务端示例
 
 ```go
 package main
@@ -80,10 +125,10 @@ import (
 
 func main() {
     // 初始化日志
-    l := logger.NewLogger()
+    l, _ := logger.New("websocket-server", nil)
     
-    // 初始化缓存（Redis）
-    c := cache.NewCache(/* cache config */)
+    // 初始化缓存
+    c, _ := cache.NewBigCache(100, 10*time.Minute)
     
     // 配置 Hub
     hubConfig := websocket.HubConfig{
@@ -104,8 +149,8 @@ func main() {
         Path:                  "/ws",
         SessionTimeoutSeconds: 3600,
         HeartbeatIntervalSecs: 30,
-        MustLogin:             false, // 允许匿名连接
-        EnableSecurity:        true,  // 启用 HMAC 签名验证
+        MustLogin:             false,
+        EnableSecurity:        true,
         SecuritySecret:        "your-secret-key",
     }
     
@@ -115,7 +160,6 @@ func main() {
     // 注册消息处理器
     server.RegisterHandler("login", handleLogin)
     server.RegisterHandler("subscribe", handleSubscribe)
-    server.RegisterHandler("message", handleMessage)
     
     // 设置断开连接处理器
     server.SetDisconnectHandler(func(client *websocket.Client) {
@@ -127,57 +171,162 @@ func main() {
         log.Fatal(err)
     }
     
-    // 等待关闭信号
-    // ... 关闭逻辑 ...
-    
     // 优雅关闭
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    server.Stop(ctx)
-    hub.Stop()
+    // ...
 }
 
 func handleLogin(client *websocket.Client, msg *websocket.ClientMessage) error {
-    var data websocket.LoginEventData
-    if err := json.Unmarshal(msg.EventData, &data); err != nil {
-        client.SendError("login", websocket.ErrCodeParamInvalid, "登录数据无效")
-        return err
-    }
-    
-    // 注册登录信息
-    client.hub.RegisterLogin(
-        client,
-        data.UserId,
-        data.AccountId,
-        []string{data.AccountId},
-        data.ClientId,
-        data.UserSessionId,
-        false,
-    )
-    
+    // 处理登录
     client.SendSuccess("login", "登录成功", nil)
     return nil
 }
 
 func handleSubscribe(client *websocket.Client, msg *websocket.ClientMessage) error {
-    var data websocket.SubscribeEventData
-    if err := json.Unmarshal(msg.EventData, &data); err != nil {
-        client.SendError("subscribe", websocket.ErrCodeParamInvalid, "订阅数据无效")
-        return err
-    }
-    
-    // 处理订阅逻辑
-    // ...
-    
+    // 处理订阅
     client.SendSuccess("subscribe", "订阅成功", nil)
     return nil
 }
+```
 
-func handleMessage(client *websocket.Client, msg *websocket.ClientMessage) error {
-    // 处理自定义消息
-    return nil
+### 客户端示例
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+    
+    "github.com/web3-coder-hub/logger"
+    "github.com/web3-coder-hub/websocket/adapter/quickws"
+    "github.com/web3-coder-hub/websocket/client"
+)
+
+func main() {
+    // 创建日志
+    l, _ := logger.New("websocket-client", nil)
+    
+    // 配置客户端
+    cfg := client.Config{
+        URL: "ws://localhost:8080/ws",
+        Headers: map[string]string{
+            "Access-Token": "your-jwt-token",
+            "Client-ID":    "client-001",
+            "Client-Type":  "APP",
+        },
+        ReconnectEnabled:     true,
+        ReconnectInterval:    5 * time.Second,
+        MaxReconnectAttempts: 10,
+        HeartbeatInterval:    30 * time.Second,
+        HeartbeatTimeout:     10 * time.Second,
+        EnableAutoHeartbeat:  true,
+    }
+    
+    // 创建适配器（QuickWS）
+    adapter := quickws.NewClientAdapter()
+    
+    // 创建客户端
+    c := client.NewClient(cfg, adapter, l)
+    
+    // 注册事件处理器
+    c.OnConnect(func() {
+        log.Println("已连接到服务器")
+        
+        // 发送登录消息
+        loginData := map[string]interface{}{
+            "userId":        "user123",
+            "accountId":     "acc456",
+            "userSessionId": "session-001",
+        }
+        c.Send("login", loginData)
+    })
+    
+    c.OnDisconnect(func() {
+        log.Println("已断开连接")
+    })
+    
+    c.OnError(func(err error) {
+        log.Printf("错误: %v", err)
+    })
+    
+    // 注册消息处理器
+    c.RegisterHandler("login", func(msg *client.Message) error {
+        log.Printf("登录响应: %s", msg.Message)
+        
+        // 订阅数据
+        subscribeData := map[string]interface{}{
+            "subList": []map[string]string{
+                {"channel": "quote", "symbol": "BTCUSDT"},
+            },
+        }
+        return c.Send("subscribe", subscribeData)
+    })
+    
+    c.RegisterHandler("subscribe", func(msg *client.Message) error {
+        log.Printf("订阅响应: %s", msg.Message)
+        return nil
+    })
+    
+    // 连接到服务器
+    if err := c.Connect(); err != nil {
+        log.Fatal(err)
+    }
+    
+    // 保持运行
+    select {}
 }
 ```
+
+完整的工作示例请参阅 [examples/](./examples/)。
+
+## 适配器支持
+
+### 切换不同的适配器
+
+库通过适配器支持多种 WebSocket 实现：
+
+**使用 QuickWS（默认）：**
+```go
+import "github.com/web3-coder-hub/websocket/adapter/quickws"
+
+adapter := quickws.NewClientAdapter()
+client := client.NewClient(config, adapter, logger)
+```
+
+**使用 Gorilla WebSocket：**
+```go
+import (
+    "github.com/gorilla/websocket"
+    gorillaAdapter "github.com/web3-coder-hub/websocket/adapter/gorilla"
+)
+
+dialer := &websocket.Dialer{
+    HandshakeTimeout: 45 * time.Second,
+}
+adapter := gorillaAdapter.NewClientAdapter(dialer)
+client := client.NewClient(config, adapter, logger)
+```
+
+### 创建自定义适配器
+
+实现 `ClientAdapter` 接口即可支持任何 WebSocket 库：
+
+```go
+type ClientAdapter interface {
+    Dial(url string, headers http.Header, callback ClientCallback) (ClientConn, error)
+    Name() string
+}
+
+type ClientConn interface {
+    Write(op Opcode, data []byte) error
+    WriteTimeout(op Opcode, data []byte, timeout time.Duration) error
+    Close() error
+    ReadMessage() (Opcode, []byte, error)
+    IsConnected() bool
+}
+```
+
+详细的适配器实现指南请参阅 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ## 消息格式
 
@@ -414,25 +563,41 @@ type Config struct {
 
 ## 依赖项
 
-- [antlabs/quickws](https://github.com/antlabs/quickws) - 高性能 WebSocket 库
+- [antlabs/quickws](https://github.com/antlabs/quickws) - 高性能 WebSocket 库（默认适配器）
+- [gorilla/websocket](https://github.com/gorilla/websocket) - 可选的 WebSocket 库
 - [google/uuid](https://github.com/google/uuid) - UUID 生成
 - [web3-coder-hub/cache](https://github.com/web3-coder-hub/cache) - 缓存抽象层（Redis/Memory/BadgerDB）
 - [web3-coder-hub/logger](https://github.com/web3-coder-hub/logger) - 结构化日志
 
 ## 性能特性
 
+### 服务端
 - **分片机制**：32 个分片最小化高并发场景下的锁竞争
 - **非阻塞发送**：默认发送操作通过通道缓冲实现非阻塞
 - **连接池化**：高效的每连接一个 goroutine 模型
 - **内存效率**：频繁读取的状态使用原子操作
 
+### 客户端
+- **自动重连**：可配置的退避和重试策略
+- **心跳监控**：主动的连接健康检查
+- **事件驱动**：基于回调的架构，开销最小
+- **线程安全**：并发安全的消息发送
+
 ## 最佳实践
 
+### 服务端
 1. **缓冲区大小**：根据消息频率设置 `SendBufferSize`，避免消息丢失
 2. **心跳调优**：保持 `PingPeriod < PongWait`，防止误判断开连接
 3. **Token 刷新**：在 token 过期前提示客户端重新登录
 4. **优雅关闭**：始终调用 hub 和 server 的 `Stop()` 方法，确保连接干净关闭
 5. **错误处理**：注册断开连接处理器，清理外部资源
+
+### 客户端
+1. **重连策略**：根据使用场景配置 `MaxReconnectAttempts` 和 `ReconnectInterval`
+2. **心跳设置**：设置 `HeartbeatTimeout > HeartbeatInterval` 避免误超时
+3. **消息处理器**：保持处理器轻量级；使用 goroutine 处理重任务
+4. **资源清理**：使用完毕后始终调用 `Close()`
+5. **错误恢复**：实现 `OnError` 和 `OnDisconnect` 处理器进行优雅降级
 
 ## 许可证
 
