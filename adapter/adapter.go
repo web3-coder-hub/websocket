@@ -16,6 +16,22 @@ const (
 	Pong   Opcode = 10
 )
 
+// ClientOption 客户端连接选项
+type ClientOption func(*ClientOptions)
+
+// ClientOptions 客户端连接配置
+type ClientOptions struct {
+	Compression bool
+	// 可以继续添加其他通用选项
+}
+
+// WithCompression 启用压缩
+func WithCompression() ClientOption {
+	return func(o *ClientOptions) {
+		o.Compression = true
+	}
+}
+
 // ServerCallback 服务端回调接口
 type ServerCallback interface {
 	OnOpen(conn ServerConn)
@@ -69,6 +85,8 @@ type ServerAdapter interface {
 type ClientAdapter interface {
 	// Dial 建立 WebSocket 连接
 	Dial(url string, headers http.Header, callback ClientCallback) (ClientConn, error)
+	// DialWithOptions 建立 WebSocket 连接（带选项）
+	DialWithOptions(url string, headers http.Header, callback ClientCallback, options ...ClientOption) (ClientConn, error)
 	// Name 适配器名称
 	Name() string
 }

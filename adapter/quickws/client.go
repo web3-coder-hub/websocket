@@ -23,6 +23,16 @@ func (a *ClientAdapter) Name() string {
 }
 
 func (a *ClientAdapter) Dial(url string, headers http.Header, callback adapter.ClientCallback) (adapter.ClientConn, error) {
+	return a.DialWithOptions(url, headers, callback)
+}
+
+func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callback adapter.ClientCallback, options ...adapter.ClientOption) (adapter.ClientConn, error) {
+	// 解析适配器选项
+	opts := &adapter.ClientOptions{}
+	for _, opt := range options {
+		opt(opts)
+	}
+
 	clientConn := &ClientConn{
 		url:      url,
 		headers:  headers,
@@ -37,7 +47,16 @@ func (a *ClientAdapter) Dial(url string, headers http.Header, callback adapter.C
 		clientConn: clientConn,
 	}
 
-	conn, err := quickws.Dial(url, quickws.WithClientCallback(wrapper))
+	// 构建 quickws 选项
+	var dialOptions []quickws.ClientOption
+	dialOptions = append(dialOptions, quickws.WithClientCallback(wrapper))
+
+	// 如果启用压缩，添加压缩选项
+	if opts.Compression {
+		dialOptions = append(dialOptions, quickws.WithClientCompression())
+	}
+
+	conn, err := quickws.Dial(url, dialOptions...)
 	if err != nil {
 		clientConn.connected.Store(0)
 		return nil, err
