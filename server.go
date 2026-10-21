@@ -170,23 +170,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.WritePump()
 	go client.HeartbeatPump()
 
-	// 自动登录：握手阶段已获取 accountId 时，自动触发 login 流程调用订阅中心
-	if authResult.AccountId != "" {
-		if handler, ok := s.getHandler(constant.EventLogin); ok {
-			loginData, _ := json.Marshal(&LoginEventData{
-				UserId:        authResult.UserId,
-				AccountId:     authResult.AccountId,
-				AccountIds:    authResult.AccountIds,
-				UserSessionId: authResult.UserSessionId,
-				ClientId:      authResult.ClientId,
-			})
-			_ = handler(client, &ClientMessage{
-				EventType: constant.EventLogin,
-				EventData: loginData,
-			})
-		}
-	}
-
 	client.SendSuccess("", "Welcome to WebSocket server", nil)
 
 	s.logger.Info("websocket client connected",
