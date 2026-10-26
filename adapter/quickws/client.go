@@ -55,6 +55,9 @@ func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callbac
 	var dialOptions []quickws.ClientOption
 	dialOptions = append(dialOptions, quickws.WithClientCallback(wrapper))
 
+	// 启用自动回复ping帧 - 这对于维持长连接至关重要
+	dialOptions = append(dialOptions, quickws.WithClientReplyPing())
+
 	// 如果启用压缩，需要同时设置压缩和解压缩
 	// quickws 要求两者都设置才会协商 permessage-deflate
 	if opts.Compression {
@@ -149,6 +152,16 @@ func (w *clientCallbackWrapper) OnMessage(conn *quickws.Conn, op quickws.Opcode,
 		return
 	}
 
+	// 跳过空消息
+	if len(data) == 0 {
+		return
+	}
+
+	// 跳过控制帧（ping/pong/close等），这些帧由底层库自动处理
+	if op.IsControl() {
+		return
+	}
+
 	// 仅在启用压缩时检测并解压缩数据
 	if w.clientConn.compressionEnabled && len(data) > 0 {
 		// JSON 数据必定以 '{' 或 '[' 开头
@@ -156,6 +169,12 @@ func (w *clientCallbackWrapper) OnMessage(conn *quickws.Conn, op quickws.Opcode,
 		if data[0] != '{' && data[0] != '[' {
 			if decompressed, err := decompressData(data); err == nil {
 				data = decompressed
+			} else {
+				// Decompression failed, report error but continue
+				if w.callback != nil {
+					w.callback.OnError(w.clientConn, err)
+				}
+				return // 解压失败就不继续处理
 			}
 		}
 	}
@@ -236,6 +255,11 @@ func (w *clientCallbackWrapper) OnClose(conn *quickws.Conn, err error) {
 		w.clientConn.connected.Store(0)
 	}
 	if w.callback != nil {
+		// If there's an error, call OnError first before OnClose
+		// This matches the behavior of other WebSocket libraries like gorilla
+		if err != nil {
+			w.callback.OnError(w.clientConn, err)
+		}
 		w.callback.OnClose(w.clientConn, err)
 	}
 }
