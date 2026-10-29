@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -68,10 +69,14 @@ type Client struct {
 	// 控制
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// 同步请求支持
+	requestManager *RequestManager
 }
 
 // Message 接收到的消息
 type Message struct {
+	RequestID string          `json:"requestId,omitempty"` // 用于同步请求
 	EventType string          `json:"eventType"`
 	EventData json.RawMessage `json:"eventData,omitempty"`
 	Channel   string          `json:"channel,omitempty"`
@@ -101,13 +106,14 @@ func NewClient(cfg Config, adapter adapter.ClientAdapter, l logger.Logger) *Clie
 	}
 
 	return &Client{
-		config:        cfg,
-		adapter:       adapter,
-		logger:        l,
-		id:            uuid.New().String(),
-		handlers:      make(map[string]MessageHandler),
-		done:          make(chan struct{}),
-		heartbeatStop: make(chan struct{}),
+		config:         cfg,
+		adapter:        adapter,
+		logger:         l,
+		id:             uuid.New().String(),
+		handlers:       make(map[string]MessageHandler),
+		done:           make(chan struct{}),
+		heartbeatStop:  make(chan struct{}),
+		requestManager: NewRequestManager(),
 	}
 }
 
@@ -175,6 +181,9 @@ func (c *Client) Close() error {
 		default:
 		}
 
+		// 清理所有pending请求
+		c.requestManager.ClearAll(adapter.ErrConnClosed)
+
 		if c.conn != nil {
 			err = c.conn.Close()
 		}
@@ -214,6 +223,63 @@ func (c *Client) SendRaw(data []byte) error {
 		return adapter.ErrNotConnected
 	}
 	return c.conn.WriteTimeout(adapter.Text, data, c.config.WriteTimeout)
+}
+
+// Request 发送同步请求
+func (c *Client) Request(ctx context.Context, eventType string, eventData interface{}) (*Message, error) {
+	if !c.connected.Load() {
+		return nil, adapter.ErrNotConnected
+	}
+
+	// 1. 生成请求ID
+	requestID := c.requestManager.GenerateRequestID()
+
+	// 2. 注册pending请求
+	pr, err := c.requestManager.RegisterRequest(requestID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 序列化事件数据
+	data, err := json.Marshal(eventData)
+	if err != nil {
+		c.requestManager.CancelRequest(requestID)
+		return nil, err
+	}
+
+	// 4. 构造消息（包含requestId）
+	msg := map[string]interface{}{
+		"requestId": requestID,
+		"eventType": eventType,
+		"eventData": json.RawMessage(data),
+	}
+
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		c.requestManager.CancelRequest(requestID)
+		return nil, err
+	}
+
+	// 5. 发送消息
+	err = c.conn.WriteTimeout(adapter.Text, payload, c.config.WriteTimeout)
+	if err != nil {
+		c.requestManager.CancelRequest(requestID)
+		return nil, err
+	}
+
+	// 6. 等待响应
+	respData, err := c.requestManager.WaitForResponse(ctx, pr)
+	if err != nil {
+		return nil, err
+	}
+
+	// 7. 解析响应
+	var respMsg Message
+	if err := json.Unmarshal(respData, &respMsg); err != nil {
+		return nil, err
+	}
+
+	return &respMsg, nil
 }
 
 // RegisterHandler 注册消息处理器
@@ -346,6 +412,14 @@ func (c *Client) handleMessage(data []byte) {
 		return
 	}
 
+	// 检查是否是同步请求的响应
+	if msg.RequestID != "" {
+		if c.requestManager.NotifyResponse(msg.RequestID, data) {
+			// 已通知到对应的同步请求，直接返回
+			return
+		}
+	}
+
 	// 查找并执行处理器
 	c.handlersMu.RLock()
 	handler, ok := c.handlers[msg.EventType]
@@ -378,6 +452,10 @@ func (cb *callbackImpl) OnMessage(conn adapter.ClientConn, op adapter.Opcode, da
 
 func (cb *callbackImpl) OnClose(conn adapter.ClientConn, err error) {
 	cb.client.connected.Store(false)
+
+	// 通知所有pending请求连接已关闭
+	cb.client.requestManager.ClearAll(adapter.ErrConnClosed)
+
 	cb.client.logger.Info("connection closed", logger.Field{Key: "error", Value: err})
 
 	if cb.client.onDisconnect != nil {
