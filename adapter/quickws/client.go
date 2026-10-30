@@ -100,11 +100,17 @@ type message struct {
 }
 
 func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
+	if c.conn == nil {
+		return adapter.ErrConnClosed
+	}
 	// #nosec G115 - Opcode 转换是安全的，值域在 0-10 范围内
 	return c.conn.WriteMessage(quickws.Opcode(op), data)
 }
 
 func (c *ClientConn) WriteTimeout(op adapter.Opcode, data []byte, timeout time.Duration) error {
+	if c.conn == nil {
+		return adapter.ErrConnClosed
+	}
 	// quickws 的 WriteMessage 不支持超时，使用默认写入
 	// #nosec G115 - Opcode 转换是安全的，值域在 0-10 范围内
 	return c.conn.WriteMessage(quickws.Opcode(op), data)

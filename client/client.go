@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,14 +26,20 @@ type Config struct {
 	HeartbeatTimeout     time.Duration     `json:"heartbeat_timeout"`
 	WriteTimeout         time.Duration     `json:"write_timeout"`
 	HandshakeTimeout     time.Duration     `json:"handshake_timeout"`
-	EnableAutoHeartbeat  bool              `json:"enable_auto_heartbeat"`
+
+	// 同步请求配置
+	RequestIDField  string `json:"request_id_field"`  // 请求ID字段名，默认 "requestId"
+	ResponseIDField string `json:"response_id_field"` // 响应ID字段名，默认 "requestId"
 }
 
-// MessageHandler 消息处理器
-type MessageHandler func(msg *Message) error
+// MessageHandler 消息处理器 - 接收解析后的消息数据（map格式）
+type MessageHandler func(data map[string]any) error
 
-// EventHandler 事件处理器
-type EventHandler func()
+// handlerEntry 处理器条目
+type handlerEntry struct {
+	handler        MessageHandler
+	eventTypeField string // 该处理器对应的事件类型字段名
+}
 
 // Client WebSocket 客户端
 type Client struct {
@@ -49,22 +57,17 @@ type Client struct {
 	sessionID string
 
 	// 消息处理
-	handlers   map[string]MessageHandler
+	handlers   map[string]*handlerEntry // 事件处理器映射
 	handlersMu sync.RWMutex
 
 	// 事件处理
-	onConnect    EventHandler
-	onDisconnect EventHandler
+	onConnect    func()
+	onDisconnect func()
 	onError      func(error)
 
 	// 重连
 	reconnecting     atomic.Bool
 	reconnectAttempt int
-
-	// 心跳
-	lastPongTime   atomic.Int64
-	heartbeatTimer *time.Timer
-	heartbeatStop  chan struct{}
 
 	// 控制
 	done      chan struct{}
@@ -72,19 +75,6 @@ type Client struct {
 
 	// 同步请求支持
 	requestManager *RequestManager
-}
-
-// Message 接收到的消息
-type Message struct {
-	RequestID string          `json:"requestId,omitempty"` // 用于同步请求
-	EventType string          `json:"eventType"`
-	EventData json.RawMessage `json:"eventData,omitempty"`
-	Channel   string          `json:"channel,omitempty"`
-	Timestamp time.Time       `json:"timestamp,omitempty"`
-	Success   bool            `json:"success,omitempty"`
-	Message   string          `json:"message,omitempty"`
-	Code      int             `json:"code,omitempty"`
-	Data      json.RawMessage `json:"data,omitempty"`
 }
 
 // NewClient 创建客户端
@@ -95,14 +85,14 @@ func NewClient(cfg Config, adapter adapter.ClientAdapter, l logger.Logger) *Clie
 	if cfg.MaxReconnectAttempts == 0 {
 		cfg.MaxReconnectAttempts = 10
 	}
-	if cfg.HeartbeatInterval == 0 {
-		cfg.HeartbeatInterval = 30 * time.Second
-	}
-	if cfg.HeartbeatTimeout == 0 {
-		cfg.HeartbeatTimeout = 10 * time.Second
-	}
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 10 * time.Second
+	}
+	if cfg.RequestIDField == "" {
+		cfg.RequestIDField = "requestId"
+	}
+	if cfg.ResponseIDField == "" {
+		cfg.ResponseIDField = "requestId"
 	}
 
 	return &Client{
@@ -110,9 +100,8 @@ func NewClient(cfg Config, adapter adapter.ClientAdapter, l logger.Logger) *Clie
 		adapter:        adapter,
 		logger:         l,
 		id:             uuid.New().String(),
-		handlers:       make(map[string]MessageHandler),
+		handlers:       make(map[string]*handlerEntry),
 		done:           make(chan struct{}),
-		heartbeatStop:  make(chan struct{}),
 		requestManager: NewRequestManager(),
 	}
 }
@@ -147,11 +136,6 @@ func (c *Client) Connect() error {
 		logger.Field{Key: "clientId", Value: c.id},
 	)
 
-	// 启动心跳
-	if c.config.EnableAutoHeartbeat {
-		go c.heartbeatLoop()
-	}
-
 	if c.onConnect != nil {
 		c.onConnect()
 	}
@@ -172,15 +156,6 @@ func (c *Client) Close() error {
 		c.connected.Store(false)
 		close(c.done)
 
-		// 停止心跳
-		if c.heartbeatTimer != nil {
-			c.heartbeatTimer.Stop()
-		}
-		select {
-		case c.heartbeatStop <- struct{}{}:
-		default:
-		}
-
 		// 清理所有pending请求
 		c.requestManager.ClearAll(adapter.ErrConnClosed)
 
@@ -193,40 +168,33 @@ func (c *Client) Close() error {
 	return err
 }
 
-// Send 发送消息
-func (c *Client) Send(eventType string, eventData interface{}) error {
+// Send 发送数据（支持map[string]any自动序列化，或[]byte直接发送）
+func (c *Client) Send(data any) error {
 	if !c.connected.Load() {
 		return adapter.ErrNotConnected
 	}
 
-	data, err := json.Marshal(eventData)
-	if err != nil {
-		return err
-	}
+	var payload []byte
+	var err error
 
-	msg := map[string]interface{}{
-		"eventType": eventType,
-		"eventData": json.RawMessage(data),
-	}
-
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		return err
+	switch v := data.(type) {
+	case []byte:
+		payload = v
+	case map[string]any:
+		payload, err = json.Marshal(v)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported data type: %T, expected []byte or map[string]any", data)
 	}
 
 	return c.conn.WriteTimeout(adapter.Text, payload, c.config.WriteTimeout)
 }
 
-// SendRaw 发送原始数据
-func (c *Client) SendRaw(data []byte) error {
-	if !c.connected.Load() {
-		return adapter.ErrNotConnected
-	}
-	return c.conn.WriteTimeout(adapter.Text, data, c.config.WriteTimeout)
-}
-
-// Request 发送同步请求
-func (c *Client) Request(ctx context.Context, eventType string, eventData interface{}) (*Message, error) {
+// Request 发送同步请求并等待响应
+// data 参数是业务请求数据（map格式），方法会自动注入请求ID字段
+func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]any, error) {
 	if !c.connected.Load() {
 		return nil, adapter.ErrNotConnected
 	}
@@ -240,21 +208,11 @@ func (c *Client) Request(ctx context.Context, eventType string, eventData interf
 		return nil, err
 	}
 
-	// 3. 序列化事件数据
-	data, err := json.Marshal(eventData)
-	if err != nil {
-		c.requestManager.CancelRequest(requestID)
-		return nil, err
-	}
+	// 3. 注入请求ID（使用配置的字段名）
+	data[c.config.RequestIDField] = requestID
 
-	// 4. 构造消息（包含requestId）
-	msg := map[string]interface{}{
-		"requestId": requestID,
-		"eventType": eventType,
-		"eventData": json.RawMessage(data),
-	}
-
-	payload, err := json.Marshal(msg)
+	// 4. 序列化
+	payload, err := json.Marshal(data)
 	if err != nil {
 		c.requestManager.CancelRequest(requestID)
 		return nil, err
@@ -273,29 +231,36 @@ func (c *Client) Request(ctx context.Context, eventType string, eventData interf
 		return nil, err
 	}
 
-	// 7. 解析响应
-	var respMsg Message
-	if err := json.Unmarshal(respData, &respMsg); err != nil {
+	// 7. 反序列化响应为 map
+	var respMap map[string]any
+	if err := json.Unmarshal(respData, &respMap); err != nil {
 		return nil, err
 	}
 
-	return &respMsg, nil
+	return respMap, nil
 }
 
-// RegisterHandler 注册消息处理器
-func (c *Client) RegisterHandler(eventType string, handler MessageHandler) {
+// RegisterHandler 注册事件处理器
+// eventType: 事件类型值（如 "trade", "kline"）
+// eventTypeField: 事件类型字段名（如 "e", "event", "type"）
+// handler: 事件处理函数
+func (c *Client) RegisterHandler(eventType string, eventTypeField string, handler MessageHandler) {
 	c.handlersMu.Lock()
-	c.handlers[eventType] = handler
-	c.handlersMu.Unlock()
+	defer c.handlersMu.Unlock()
+
+	c.handlers[eventType] = &handlerEntry{
+		handler:        handler,
+		eventTypeField: eventTypeField,
+	}
 }
 
 // OnConnect 设置连接成功回调
-func (c *Client) OnConnect(handler EventHandler) {
+func (c *Client) OnConnect(handler func()) {
 	c.onConnect = handler
 }
 
 // OnDisconnect 设置断开连接回调
-func (c *Client) OnDisconnect(handler EventHandler) {
+func (c *Client) OnDisconnect(handler func()) {
 	c.onDisconnect = handler
 }
 
@@ -322,45 +287,6 @@ func (c *Client) GetSessionID() string {
 // SetSessionID 设置会话 ID
 func (c *Client) SetSessionID(sessionID string) {
 	c.sessionID = sessionID
-}
-
-// heartbeatLoop 心跳循环
-func (c *Client) heartbeatLoop() {
-	c.heartbeatTimer = time.NewTimer(c.config.HeartbeatInterval)
-	defer c.heartbeatTimer.Stop()
-
-	for {
-		select {
-		case <-c.heartbeatTimer.C:
-			if c.connected.Load() {
-				c.sendPing()
-				c.checkPongTimeout()
-			}
-			c.heartbeatTimer.Reset(c.config.HeartbeatInterval)
-		case <-c.heartbeatStop:
-			return
-		case <-c.done:
-			return
-		}
-	}
-}
-
-// sendPing 发送 ping
-func (c *Client) sendPing() {
-	msg := map[string]interface{}{
-		"eventType": "ping",
-	}
-	data, _ := json.Marshal(msg)
-	_ = c.conn.WriteTimeout(adapter.Text, data, c.config.WriteTimeout)
-}
-
-// checkPongTimeout 检查 pong 超时
-func (c *Client) checkPongTimeout() {
-	lastPong := time.Unix(0, c.lastPongTime.Load())
-	if !lastPong.IsZero() && time.Since(lastPong) > c.config.HeartbeatTimeout {
-		c.logger.Warn("heartbeat timeout, reconnecting")
-		c.reconnect()
-	}
 }
 
 // reconnect 重连
@@ -400,35 +326,98 @@ func (c *Client) reconnect() {
 
 // handleMessage 处理接收到的消息
 func (c *Client) handleMessage(data []byte) {
-	var msg Message
-	if err := json.Unmarshal(data, &msg); err != nil {
-		c.logger.Error("failed to unmarshal message", logger.Field{Key: "error", Value: err.Error()})
+	// 1. 尝试解析为JSON
+	var msgData any
+	err := json.Unmarshal(data, &msgData)
+
+	// 2. 解析失败，作为原始文本处理
+	if err != nil {
+		c.handleNonMapMessage(string(data))
 		return
 	}
 
-	// 处理 pong
-	if msg.EventType == "pong" {
-		c.lastPongTime.Store(time.Now().UnixNano())
+	// 3. 解析成功，判断是否为map
+	msgMap, isMap := msgData.(map[string]any)
+	if !isMap {
+		// 非map的JSON（字符串、数组等）
+		c.handleNonMapMessage(msgData)
 		return
 	}
 
-	// 检查是否是同步请求的响应
-	if msg.RequestID != "" {
-		if c.requestManager.NotifyResponse(msg.RequestID, data) {
-			// 已通知到对应的同步请求，直接返回
+	// 4. 检查是否是同步请求的响应
+	if responseID, ok := msgMap[c.config.ResponseIDField].(string); ok && responseID != "" {
+		if c.requestManager.NotifyResponse(responseID, data) {
 			return
 		}
 	}
 
-	// 查找并执行处理器
+	// 5. 遍历处理器，查找匹配的事件类型
 	c.handlersMu.RLock()
-	handler, ok := c.handlers[msg.EventType]
+	handlers := c.handlers
 	c.handlersMu.RUnlock()
 
-	if ok {
-		if err := handler(&msg); err != nil {
-			c.logger.Error("message handler error",
-				logger.Field{Key: "eventType", Value: msg.EventType},
+	for eventType, entry := range handlers {
+		// 支持嵌套字段访问（如 "event.account" 或 "channel.type"）
+		if fieldValue := getNestedField(msgMap, entry.eventTypeField); fieldValue == eventType {
+			if err := entry.handler(msgMap); err != nil {
+				c.logger.Error("event handler error",
+					logger.Field{Key: "eventType", Value: eventType},
+					logger.Field{Key: "error", Value: err.Error()},
+				)
+			}
+			return
+		}
+	}
+
+	// 6. 没有匹配的处理器
+	c.logger.Debug("no handler matched for message")
+}
+
+// getNestedField 从map中获取嵌套字段的值（支持 "a.b.c" 格式）
+// 返回字符串类型的值，如果字段不存在或类型不匹配则返回空字符串
+func getNestedField(m map[string]any, fieldPath string) string {
+	if fieldPath == "" {
+		return ""
+	}
+
+	// 分割字段路径
+	parts := strings.Split(fieldPath, ".")
+	var current any = m
+
+	// 逐层访问
+	for _, part := range parts {
+		currentMap, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+
+		current, ok = currentMap[part]
+		if !ok {
+			return ""
+		}
+	}
+
+	// 最终值必须是字符串类型
+	if str, ok := current.(string); ok {
+		return str
+	}
+
+	return ""
+}
+
+// handleNonMapMessage 处理非map类型的消息（原始文本或JSON非对象类型）
+func (c *Client) handleNonMapMessage(rawData any) {
+	wrappedMsg := map[string]any{
+		"_raw": rawData,
+	}
+
+	c.handlersMu.RLock()
+	handlers := c.handlers
+	c.handlersMu.RUnlock()
+
+	for _, entry := range handlers {
+		if err := entry.handler(wrappedMsg); err != nil {
+			c.logger.Error("event handler error for non-map message",
 				logger.Field{Key: "error", Value: err.Error()},
 			)
 		}
@@ -456,7 +445,11 @@ func (cb *callbackImpl) OnClose(conn adapter.ClientConn, err error) {
 	// 通知所有pending请求连接已关闭
 	cb.client.requestManager.ClearAll(adapter.ErrConnClosed)
 
-	cb.client.logger.Info("connection closed", logger.Field{Key: "error", Value: err})
+	if err != nil {
+		cb.client.logger.Info("connection closed", logger.Field{Key: "error", Value: err.Error()})
+	} else {
+		cb.client.logger.Info("connection closed")
+	}
 
 	if cb.client.onDisconnect != nil {
 		cb.client.onDisconnect()

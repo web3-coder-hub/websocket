@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"context"
 	"net/http"
 	"time"
 )
@@ -72,13 +71,6 @@ type ClientConn interface {
 	ReadMessage() (Opcode, []byte, error)
 	// IsConnected 是否已连接
 	IsConnected() bool
-}
-
-// SyncClientConn 支持同步请求的客户端连接
-type SyncClientConn interface {
-	ClientConn
-	// Request 发送同步请求并等待响应
-	Request(ctx context.Context, op Opcode, data []byte) ([]byte, error)
 }
 
 // ServerAdapter 服务端适配器接口
