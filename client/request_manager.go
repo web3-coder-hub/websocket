@@ -28,7 +28,7 @@ func NewRequestManager() *RequestManager {
 // GenerateRequestID 生成唯一请求ID
 func (rm *RequestManager) GenerateRequestID() string {
 	seq := rm.requestIDSeq.Add(1)
-	return fmt.Sprintf("req-%d", seq)
+	return fmt.Sprintf("req%d", seq)
 }
 
 // RegisterRequest 注册请求并返回等待通道
