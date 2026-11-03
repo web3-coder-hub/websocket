@@ -72,9 +72,13 @@ func (rm *RequestManager) NotifyResponse(requestID string, data []byte) bool {
 
 	pr := value.(*pendingRequest)
 
+	// 拷贝数据，避免底层缓冲区被重用导致并发修改
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
 	// 非阻塞发送（channel容量为1）
 	select {
-	case pr.respChan <- data:
+	case pr.respChan <- dataCopy:
 	default:
 		// 不应该发生（说明已经有响应了）
 	}
