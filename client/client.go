@@ -208,11 +208,15 @@ func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]a
 		return nil, err
 	}
 
-	// 3. 注入请求ID（使用配置的字段名）
-	data[c.config.RequestIDField] = requestID
+	// 3. 创建map副本并注入请求ID（避免修改原始map导致数据竞争）
+	requestData := make(map[string]any, len(data)+1)
+	for k, v := range data {
+		requestData[k] = v
+	}
+	requestData[c.config.RequestIDField] = requestID
 
 	// 4. 序列化
-	payload, err := json.Marshal(data)
+	payload, err := json.Marshal(requestData)
 	if err != nil {
 		c.requestManager.CancelRequest(requestID)
 		return nil, err
