@@ -208,6 +208,13 @@ func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]a
 		return nil, err
 	}
 
+	// 确保清理：无论成功或失败，都要从pending列表中移除
+	defer func() {
+		if err != nil {
+			c.requestManager.CancelRequest(requestID)
+		}
+	}()
+
 	// 3. 创建map副本并注入请求ID（避免修改原始map导致数据竞争）
 	requestData := make(map[string]any, len(data)+1)
 	for k, v := range data {
@@ -218,14 +225,12 @@ func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]a
 	// 4. 序列化
 	payload, err := json.Marshal(requestData)
 	if err != nil {
-		c.requestManager.CancelRequest(requestID)
 		return nil, err
 	}
 
 	// 5. 发送消息
 	err = c.conn.WriteTimeout(adapter.Text, payload, c.config.WriteTimeout)
 	if err != nil {
-		c.requestManager.CancelRequest(requestID)
 		return nil, err
 	}
 
