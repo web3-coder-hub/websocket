@@ -16,6 +16,8 @@ type ClientAdapter struct {
 }
 
 // NewClientAdapter 创建 gorilla 客户端适配器
+// 如果 dialer 为 nil，则使用默认配置（不启用压缩）
+// 调用方可以传入自定义 dialer 来控制压缩等选项
 func NewClientAdapter(dialer *websocket.Dialer) adapter.ClientAdapter {
 	if dialer == nil {
 		dialer = &websocket.Dialer{
@@ -30,7 +32,23 @@ func (a *ClientAdapter) Name() string {
 }
 
 func (a *ClientAdapter) Dial(url string, headers http.Header, callback adapter.ClientCallback) (adapter.ClientConn, error) {
-	conn, _, err := a.dialer.Dial(url, headers)
+	return a.DialWithOptions(url, headers, callback)
+}
+
+func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callback adapter.ClientCallback, options ...adapter.ClientOption) (adapter.ClientConn, error) {
+	// 解析适配器选项
+	opts := &adapter.ClientOptions{}
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	// 应用选项到 dialer
+	dialer := a.dialer
+	if opts.Compression {
+		dialer.EnableCompression = true
+	}
+
+	conn, _, err := dialer.Dial(url, headers)
 	if err != nil {
 		return nil, err
 	}

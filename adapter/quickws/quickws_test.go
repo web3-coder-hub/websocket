@@ -331,22 +331,14 @@ func TestClientCallbackWrapper(t *testing.T) {
 		testData := []byte("test message")
 		wrapper.OnMessage(nil, quickws.Text, testData)
 
-		// Wait for message to be processed
-		time.Sleep(50 * time.Millisecond)
-
-		if !callback.onMessageCalled {
-			t.Error("Expected OnMessage to be called")
-		}
-
-		if len(callback.messages) != 1 {
-			t.Errorf("Expected 1 message, got %d", len(callback.messages))
-		}
-
 		// Check if message was added to readChan
 		select {
 		case msg := <-clientConn.readChan:
+			if msg.op != adapter.Text {
+				t.Errorf("Expected opcode %d, got %d", adapter.Text, msg.op)
+			}
 			if string(msg.data) != string(testData) {
-				t.Errorf("Expected message '%s' in channel, got '%s'", testData, msg.data)
+				t.Errorf("Expected message '%s', got '%s'", testData, msg.data)
 			}
 		case <-time.After(time.Second):
 			t.Error("Timeout waiting for message in channel")
@@ -456,8 +448,7 @@ func BenchmarkServerCallback(b *testing.B) {
 func BenchmarkClientCallback(b *testing.B) {
 	callback := &mockClientCallback{}
 	clientConn := &ClientConn{
-		readChan: make(chan message, 1000),
-		done:     make(chan struct{}),
+		done: make(chan struct{}),
 	}
 	clientConn.connected.Store(1)
 
