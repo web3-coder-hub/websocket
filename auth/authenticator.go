@@ -17,8 +17,6 @@ import (
 
 const (
 	tokenHeader      = "Access-Token"
-	clientIDHeader   = "Client-ID"
-	clientTypeHeader = "Client-Type"
 	accountIdsHeader = "Account-Ids"
 	bearerPrefix     = "Bearer "
 
@@ -53,7 +51,6 @@ type AuthResult struct {
 	ClientId      string    // 客户端标识
 	ClientIp      string    // 客户端真实 IP
 	ClientType    string    // 客户端类型（APP/WEB/BMS 等）
-	IsBmsLogin    bool      // 是否 BMS 后台登录
 	AccountIds    string    // 多账户 ID 列表
 	TokenExpiry   time.Time // JWT 过期时间，零值表示无 Token 或 Token 中无 exp
 }
@@ -68,15 +65,15 @@ type jwtPayload struct {
 // loginUser 从 JWT content 字段反序列化的用户身份信息
 type loginUser struct {
 	Name         string `json:"name"`
+	ClientType   string `json:"clientType"`
 	DataCacheKey string `json:"dataCacheKey"`
 	AuthCacheKey string `json:"authCacheKey"`
 }
 
 // userData Redis 缓存中的用户数据
 type userData struct {
-	UserId     interface{} `json:"userId"`
-	ActId      interface{} `json:"actId"`
-	IsBmsLogin interface{} `json:"isBmsLogin"`
+	UserId interface{} `json:"userId"`
+	ActId  interface{} `json:"actId"`
 }
 
 // AuthError 认证错误，包含 HTTP 状态码和业务错误码
@@ -96,39 +93,46 @@ var (
 )
 
 // Authenticate 在 WebSocket 升级前验证 HTTP 请求。
-// 支持 nil receiver：当未配置 Authenticator 时，从请求中提取 clientId 等信息生成匿名身份标识，
+// 支持 nil receiver：当未配置 Authenticator 时，由库自动生成匿名会话标识
 func (a *Authenticator) Authenticate(r *http.Request) (*AuthResult, error) {
-	clientType := extractParam(r, clientTypeHeader, defaultClientType)
-	clientId := extractClientId(r)
-	clientIp := extractRealIP(r)
-	accountIds := extractParam(r, accountIdsHeader, "")
-
-	token := ""
-	if a != nil {
-		token = extractToken(r)
+	// nil receiver：自动生成匿名会话标识
+	if a == nil {
+		return &AuthResult{
+			UserSessionId: generateSessionId(),
+		}, nil
 	}
 
-	// nil receiver / mustLogin=false 且无 Token：允许匿名连接
+	clientId := generateClientId(r)
+	clientIp := extractRealIP(r)
+	accountIds := extractHeaderOnly(r, accountIdsHeader, "")
+	token := extractToken(r)
+
+	// mustLogin=false 且无 Token：允许匿名连接
 	if token == "" {
-		if a != nil && a.mustLogin {
+		if a.mustLogin {
 			return nil, errTokenMissing
 		}
 		return &AuthResult{
-			UserSessionId: sha256Hex(clientType + "-" + clientId),
+			UserSessionId: sha256Hex(defaultClientType + "-" + clientId),
 			ClientId:      clientId,
 			ClientIp:      clientIp,
-			ClientType:    clientType,
+			ClientType:    defaultClientType,
 			AccountIds:    accountIds,
 		}, nil
 	}
 
-	userId, accountId, isBmsLogin, expiry, err := a.parseToken(token)
+	userId, accountId, clientType, expiry, err := a.parseToken(token)
 	if err != nil {
 		a.logger.Warn("token validation failed",
 			logger.Field{Key: "error", Value: err.Error()},
 			logger.Field{Key: "remoteAddr", Value: clientIp},
 		)
 		return nil, errTokenInvalid
+	}
+
+	// 如果 token 中未提供 clientType，使用默认值
+	if clientType == "" {
+		clientType = defaultClientType
 	}
 
 	result := &AuthResult{
@@ -138,7 +142,6 @@ func (a *Authenticator) Authenticate(r *http.Request) (*AuthResult, error) {
 		ClientId:      clientId,
 		ClientIp:      clientIp,
 		ClientType:    clientType,
-		IsBmsLogin:    isBmsLogin || strings.EqualFold(clientType, "BMS"),
 		AccountIds:    accountIds,
 		TokenExpiry:   expiry,
 	}
@@ -162,7 +165,7 @@ func (a *Authenticator) ValidateToken(token string) (*AuthResult, error) {
 		return nil, fmt.Errorf("token is required")
 	}
 
-	userId, accountId, isBmsLogin, expiry, err := a.parseToken(token)
+	userId, accountId, clientType, expiry, err := a.parseToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -170,25 +173,27 @@ func (a *Authenticator) ValidateToken(token string) (*AuthResult, error) {
 	return &AuthResult{
 		UserId:      userId,
 		AccountId:   accountId,
-		IsBmsLogin:  isBmsLogin,
+		ClientType:  clientType,
 		TokenExpiry: expiry,
 	}, nil
 }
 
 // parseToken 解析 JWT 并通过 Redis 查询用户数据。
-// 返回 userId/accountId/isBmsLogin 以及 JWT 过期时间。
-func (a *Authenticator) parseToken(token string) (userId, accountId string, isBmsLogin bool, expiry time.Time, err error) {
+// 返回 userId/accountId/clientType 以及 JWT 过期时间。
+func (a *Authenticator) parseToken(token string) (userId, accountId, clientType string, expiry time.Time, err error) {
 	lu, exp, err := parseJWT(token)
 	if err != nil {
-		return "", "", false, time.Time{}, err
+		return "", "", "", time.Time{}, err
 	}
 
 	if exp > 0 {
 		expiry = time.Unix(exp, 0)
 	}
 
+	clientType = lu.ClientType
+
 	if a.cache == nil || lu.DataCacheKey == "" {
-		return "", "", false, expiry, nil
+		return "", "", clientType, expiry, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -197,10 +202,10 @@ func (a *Authenticator) parseToken(token string) (userId, accountId string, isBm
 	cacheKey := userDataCacheName + "::" + lu.DataCacheKey
 	raw, exists, cacheErr := a.cache.Get(ctx, cacheKey)
 	if cacheErr != nil {
-		return "", "", false, time.Time{}, fmt.Errorf("cache lookup failed: %w", cacheErr)
+		return "", "", "", time.Time{}, fmt.Errorf("cache lookup failed: %w", cacheErr)
 	}
 	if !exists {
-		return "", "", false, time.Time{}, fmt.Errorf("user data not found in cache, token may be expired")
+		return "", "", "", time.Time{}, fmt.Errorf("user data not found in cache, token may be expired")
 	}
 
 	var ud userData
@@ -209,15 +214,12 @@ func (a *Authenticator) parseToken(token string) (userId, accountId string, isBm
 			logger.Field{Key: "cacheKey", Value: cacheKey},
 			logger.Field{Key: "error", Value: err.Error()},
 		)
-		return "", "", false, expiry, nil
+		return "", "", clientType, expiry, nil
 	}
 
 	userId = toString(ud.UserId)
 	accountId = toString(ud.ActId)
-	if bms, ok := ud.IsBmsLogin.(bool); ok && bms {
-		isBmsLogin = true
-	}
-	return userId, accountId, isBmsLogin, expiry, nil
+	return userId, accountId, clientType, expiry, nil
 }
 
 // SendAuthError 向客户端写入认证失败的 HTTP JSON 响应
@@ -241,38 +243,37 @@ func SendAuthError(w http.ResponseWriter, err error) {
 
 //  参数提取
 
-// extractToken 从请求头或 URL 查询参数中提取 Access-Token，请求头优先，支持 Bearer 前缀
+// extractToken 从请求头中提取 Access-Token，支持 Bearer 前缀
+// 安全考虑：仅支持请求头方式，避免敏感 Token 出现在 URL 中被日志记录或泄露
 func extractToken(r *http.Request) string {
-	if h := r.Header.Get(tokenHeader); h != "" {
-		if strings.HasPrefix(h, bearerPrefix) {
-			return h[len(bearerPrefix):]
-		}
-		return h
+	h := r.Header.Get(tokenHeader)
+	if h == "" {
+		return ""
 	}
-	return r.URL.Query().Get(tokenHeader)
+	if strings.HasPrefix(h, bearerPrefix) {
+		return h[len(bearerPrefix):]
+	}
+	return h
 }
 
-// extractClientId 从请求头或查询参数中提取 Client-ID，
-// 都未提供时通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成
-func extractClientId(r *http.Request) string {
-	if h := r.Header.Get(clientIDHeader); h != "" {
-		return h
-	}
-	if q := r.URL.Query().Get(clientIDHeader); q != "" {
-		return q
-	}
-
+// generateClientId 通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成客户端标识
+func generateClientId(r *http.Request) string {
 	fingerprint := r.UserAgent() + "|" + extractRealIP(r)
 	return sha256Hex(fingerprint)
 }
 
-// extractParam 从请求头或查询参数中提取指定参数，都为空时返回 defaultVal
-func extractParam(r *http.Request, name, defaultVal string) string {
+// generateSessionId 生成随机会话标识（用于未配置认证器时的匿名会话）
+func generateSessionId() string {
+	timestamp := time.Now().UnixNano()
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
+	return fmt.Sprintf("%d-%x", timestamp, hash[:4])[:32]
+}
+
+// extractHeaderOnly 仅从请求头中提取指定参数，不支持查询参数
+// 用于敏感信息（如 Account-Ids）以避免在 URL 中暴露
+func extractHeaderOnly(r *http.Request, name, defaultVal string) string {
 	if h := r.Header.Get(name); h != "" {
 		return h
-	}
-	if q := r.URL.Query().Get(name); q != "" {
-		return q
 	}
 	return defaultVal
 }
