@@ -36,7 +36,3 @@ const (
 	// DefaultClientType 默认客户端类型
 	DefaultClientType = "APP"
 )
-
-const (
-	AccountIds = "Account-Ids"
-)

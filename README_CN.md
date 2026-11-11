@@ -122,6 +122,7 @@ import (
     "time"
     
     "github.com/web3-coder-hub/websocket"
+    "github.com/web3-coder-hub/websocket/adapter/quickws"
     "github.com/web3-coder-hub/cache"
     "github.com/web3-coder-hub/logger"
 )
@@ -146,20 +147,25 @@ func main() {
     hub := websocket.NewHub(hubConfig, l)
     go hub.Run()
     
+    // 创建适配器
+    adapter := quickws.NewServerAdapter()
+    
     // 配置服务器
     serverConfig := websocket.Config{
         Port:                   8080,
         Path:                   "/ws",
         SessionTimeoutSeconds:  3600,
         HeartbeatIntervalSecs:  30,
-        AuthType:               "token",  // 认证类型：""、"token"、"sign"
-        PendingAuthTimeoutSecs: 10,       // 待认证超时时间
+        AuthType:               "token",              // 认证类型：""、"token"、"sign"
+        PendingAuthTimeoutSecs: 10,                   // 待认证超时时间
         EnableSecurity:         true,
         SecuritySecret:         "your-secret-key",
+        CredentialParseFunc:    parseMyToken,         // 自定义 token 解析器（token 认证必需）
+        Cache:                  c,                    // 缓存实例，用于身份认证
     }
     
     // 创建服务器
-    server := websocket.NewServer(serverConfig, hub, c, l)
+    server := websocket.NewServer(serverConfig, hub, adapter, l)
     
     // 注册消息处理器
     server.RegisterHandler("login", handleLogin)
@@ -392,6 +398,7 @@ type ClientConn interface {
    - 支持握手认证和延迟认证两种方式
    - 通过 HTTP 头或 LOGIN 事件验证 token
    - 应用层决定缓存实现（Redis、内存等）
+   - 完全泛型 - 无预定义数据结构
 
 3. **签名认证 (`AuthType: "sign"`)** _（计划中）_
    - 基于 HMAC 的请求签名
@@ -448,6 +455,148 @@ serverConfig := websocket.Config{
 - 可以通过发送新的 LOGIN 事件刷新凭证
 - 认证过期后，受保护的操作会触发 `ErrCodeAuthFailed` 错误
 - 成功重新认证后，客户端状态自动更新
+
+### 泛型 JWT 解析和自定义认证
+
+库提供了泛型辅助函数用于实现自定义认证逻辑。所有 JWT 结构由应用层定义 - 库不对数据格式做任何假设。
+
+#### 定义数据结构
+
+```go
+// 定义你自己的 JWT content 结构
+type MyLoginUser struct {
+    UserID     string `json:"userId"`
+    CacheKey   string `json:"cacheKey"`
+    ClientType string `json:"clientType"`
+    TenantID   string `json:"tenantId"`  // 任何你需要的自定义字段
+}
+
+// 定义缓存的用户数据结构
+type MyUserData struct {
+    UserID    string `json:"userId"`
+    AccountID string `json:"accountId"`
+    Roles     []string `json:"roles"`
+}
+```
+
+#### 实现自定义 Token 解析器
+
+```go
+import (
+    "context"
+    "fmt"
+    "time"
+    
+    "github.com/web3-coder-hub/cache"
+    "github.com/web3-coder-hub/logger"
+    "github.com/web3-coder-hub/websocket/auth"
+)
+
+// 实现 CredentialParseFunc 自定义逻辑
+func parseMyToken(token string, c cache.Cache, l logger.Logger) (
+    userId, accountId, clientType string, 
+    expiry time.Time, 
+    err error,
+) {
+    // 1. 使用泛型 ParseJWT 函数解析 JWT
+    loginUser, exp, err := auth.ParseJWT[MyLoginUser](token)
+    if err != nil {
+        return "", "", "", time.Time{}, fmt.Errorf("解析 JWT 失败: %w", err)
+    }
+
+    // 2. 设置过期时间
+    if exp > 0 {
+        expiry = time.Unix(exp, 0)
+    }
+
+    // 3. 可选：从缓存获取用户数据
+    if c != nil && loginUser.CacheKey != "" {
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+
+        // 应用层定义完整的缓存键格式
+        // 库不会添加任何前缀
+        cacheKey := fmt.Sprintf("tenant:%s:user:%s", loginUser.TenantID, loginUser.CacheKey)
+        
+        userData, err := auth.ParseCache[MyUserData](ctx, c, cacheKey)
+        if err == nil {
+            return userData.UserID, userData.AccountID, loginUser.ClientType, expiry, nil
+        }
+
+        // 缓存未命中不是致命错误，继续使用 JWT 数据
+        if l != nil {
+            l.Warn("从缓存获取用户数据失败", 
+                logger.Field{Key: "error", Value: err.Error()})
+        }
+    }
+
+    // 4. 返回 JWT 中的数据
+    return loginUser.UserID, "", loginUser.ClientType, expiry, nil
+}
+```
+
+#### 使用自定义解析器配置服务器
+
+**基础配置（使用默认设置）：**
+
+```go
+cfg := websocket.Config{
+    Port:                   8080,
+    Path:                   "/ws",
+    AuthType:               constant.AuthTypeToken,
+    CredentialParseFunc:    parseMyToken,      // 你的自定义解析器
+    Cache:                  myCache,
+}
+
+server := websocket.NewServer(cfg, hub, adapter, logger.Default())
+```
+
+**高级配置（自定义请求头和默认值）：**
+
+```go
+// 创建自定义 token 认证策略
+authConfig := auth.TokenAuthConfig{
+    Cache:             myCache,
+    Logger:            logger.Default(),
+    ParseFunc:         parseMyToken,
+    TokenHeader:       "X-Auth-Token",     // 自定义请求头名称（默认："Access-Token"）
+    BearerPrefix:      "Token ",           // 自定义前缀（默认："Bearer "）
+    AccountIdsHeader:  "X-Account-Ids",    // 自定义 Account IDs 请求头（默认："Account-Ids"）
+    DefaultClientType: "WEB",              // 自定义默认值（默认："APP"）
+}
+
+strategy := auth.NewTokenAuthStrategy(authConfig)
+authenticator := auth.NewAuthenticator(constant.AuthTypeToken, strategy, 30, logger.Default())
+
+// 创建服务器并设置自定义认证器
+cfg := websocket.Config{
+    Port: 8080,
+    Path: "/ws",
+}
+
+server := websocket.NewServer(cfg, hub, adapter, logger.Default())
+server.SetAuthenticator(authenticator)
+```
+
+#### 可用的泛型辅助函数
+
+**`ParseJWT[T any](token string) (*T, int64, error)`**
+- 解析 `content` 字段直接包含数据结构的 JWT
+- 返回：解析后的 content、过期时间戳（Unix 秒）、错误
+- 示例：`{"content": {"userId": "123"}, "exp": 1234567890}`
+
+**`ParseCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error)`**
+- 从缓存解析用户数据，完全控制缓存键格式
+- 应用层定义完整的缓存键（无自动前缀/分隔符）
+- 返回：解析后的数据、错误
+
+#### 关键设计原则
+
+1. **无预定义结构**：库不定义任何默认的用户、登录或 JWT payload 结构
+2. **完全灵活**：定义任何字段、类型或嵌套结构
+3. **完整缓存控制**：应用层定义完整的缓存键格式
+4. **可配置常量**：Token 请求头、Bearer 前缀、Account IDs 请求头和客户端类型默认值均可自定义
+5. **类型安全**：Go 泛型确保编译时类型检查
 
 ### 消息认证（HMAC 签名）
 
@@ -603,14 +752,16 @@ type HubConfig struct {
 
 ```go
 type Config struct {
-    Port                   int    // 服务器端口
-    Path                   string // WebSocket 端点路径
-    SessionTimeoutSeconds  int    // 会话超时时间
-    HeartbeatIntervalSecs  int    // 心跳间隔
-    AuthType               string // 认证类型：""、"token"、"sign"
-    PendingAuthTimeoutSecs int    // 待认证超时时间（秒）
-    EnableSecurity         bool   // 是否启用 HMAC 签名验证
-    SecuritySecret         string // HMAC 密钥
+    Port                   int                      // 服务器端口
+    Path                   string                   // WebSocket 端点路径
+    SessionTimeoutSeconds  int                      // 会话超时时间
+    HeartbeatIntervalSecs  int                      // 心跳间隔
+    AuthType               string                   // 认证类型：""、"token"、"sign"
+    PendingAuthTimeoutSecs int                      // 待认证超时时间（秒）
+    EnableSecurity         bool                     // 是否启用 HMAC 签名验证
+    SecuritySecret         string                   // HMAC 密钥
+    CredentialParseFunc    auth.CredentialParseFunc // 自定义 token 解析器（token 认证必需）
+    Cache                  cache.Cache              // 缓存实例，用于身份认证
 }
 ```
 

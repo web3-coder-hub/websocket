@@ -122,6 +122,7 @@ import (
     "time"
     
     "github.com/web3-coder-hub/websocket"
+    "github.com/web3-coder-hub/websocket/adapter/quickws"
     "github.com/web3-coder-hub/cache"
     "github.com/web3-coder-hub/logger"
 )
@@ -146,20 +147,25 @@ func main() {
     hub := websocket.NewHub(hubConfig, l)
     go hub.Run()
     
+    // Create adapter
+    adapter := quickws.NewServerAdapter()
+    
     // Configure server
     serverConfig := websocket.Config{
         Port:                   8080,
         Path:                   "/ws",
         SessionTimeoutSeconds:  3600,
         HeartbeatIntervalSecs:  30,
-        AuthType:               "token",  // Authentication type: "", "token", "sign"
-        PendingAuthTimeoutSecs: 10,       // Timeout for pending authentication
+        AuthType:               "token",              // Authentication type: "", "token", "sign"
+        PendingAuthTimeoutSecs: 10,                   // Timeout for pending authentication
         EnableSecurity:         true,
         SecuritySecret:         "your-secret-key",
+        CredentialParseFunc:    parseMyToken,         // Custom token parser (required for token auth)
+        Cache:                  c,                    // Cache instance for authentication
     }
     
     // Create server
-    server := websocket.NewServer(serverConfig, hub, c, l)
+    server := websocket.NewServer(serverConfig, hub, adapter, l)
     
     // Register message handlers
     server.RegisterHandler("login", handleLogin)
@@ -392,6 +398,7 @@ The server supports three authentication modes via the `AuthType` configuration:
    - Supports both handshake and delayed authentication
    - Token validation via HTTP header or LOGIN event
    - Application layer decides cache implementation (Redis, Memory, etc.)
+   - Fully generic - no predefined data structures
 
 3. **Signature Authentication (`AuthType: "sign"`)** _(Planned)_
    - HMAC-based request signing
@@ -448,6 +455,148 @@ serverConfig := websocket.Config{
 - Credentials can be refreshed by sending a new LOGIN event
 - Expired authentication triggers `ErrCodeAuthFailed` for protected operations
 - Client state automatically updates upon successful re-authentication
+
+### Generic JWT Parsing and Custom Authentication
+
+The library provides generic helper functions for implementing custom authentication logic. All JWT structures are defined by the application layer - the library makes no assumptions about your data format.
+
+#### Define Your Data Structures
+
+```go
+// Define your own JWT content structure
+type MyLoginUser struct {
+    UserID     string `json:"userId"`
+    CacheKey   string `json:"cacheKey"`
+    ClientType string `json:"clientType"`
+    TenantID   string `json:"tenantId"`  // Any custom fields you need
+}
+
+// Define your cached user data structure
+type MyUserData struct {
+    UserID    string `json:"userId"`
+    AccountID string `json:"accountId"`
+    Roles     []string `json:"roles"`
+}
+```
+
+#### Implement Custom Token Parser
+
+```go
+import (
+    "context"
+    "fmt"
+    "time"
+    
+    "github.com/web3-coder-hub/cache"
+    "github.com/web3-coder-hub/logger"
+    "github.com/web3-coder-hub/websocket/auth"
+)
+
+// Implement CredentialParseFunc with your custom logic
+func parseMyToken(token string, c cache.Cache, l logger.Logger) (
+    userId, accountId, clientType string, 
+    expiry time.Time, 
+    err error,
+) {
+    // 1. Parse JWT using generic ParseJWT function
+    loginUser, exp, err := auth.ParseJWT[MyLoginUser](token)
+    if err != nil {
+        return "", "", "", time.Time{}, fmt.Errorf("parse JWT failed: %w", err)
+    }
+
+    // 2. Set expiry time
+    if exp > 0 {
+        expiry = time.Unix(exp, 0)
+    }
+
+    // 3. Optionally fetch user data from cache
+    if c != nil && loginUser.CacheKey != "" {
+        ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+        defer cancel()
+
+        // Application layer defines the complete cache key format
+        // No prefix is added by the library
+        cacheKey := fmt.Sprintf("tenant:%s:user:%s", loginUser.TenantID, loginUser.CacheKey)
+        
+        userData, err := auth.ParseCache[MyUserData](ctx, c, cacheKey)
+        if err == nil {
+            return userData.UserID, userData.AccountID, loginUser.ClientType, expiry, nil
+        }
+
+        // Cache miss is not fatal, continue with JWT data
+        if l != nil {
+            l.Warn("failed to fetch user data from cache", 
+                logger.Field{Key: "error", Value: err.Error()})
+        }
+    }
+
+    // 4. Return data from JWT
+    return loginUser.UserID, "", loginUser.ClientType, expiry, nil
+}
+```
+
+#### Configure Server with Custom Parser
+
+**Basic Configuration (Default Settings):**
+
+```go
+cfg := websocket.Config{
+    Port:                   8080,
+    Path:                   "/ws",
+    AuthType:               constant.AuthTypeToken,
+    CredentialParseFunc:    parseMyToken,      // Your custom parser
+    Cache:                  myCache,
+}
+
+server := websocket.NewServer(cfg, hub, adapter, logger.Default())
+```
+
+**Advanced Configuration (Custom Headers and Defaults):**
+
+```go
+// Create custom token authentication strategy
+authConfig := auth.TokenAuthConfig{
+    Cache:             myCache,
+    Logger:            logger.Default(),
+    ParseFunc:         parseMyToken,
+    TokenHeader:       "X-Auth-Token",     // Custom header name (default: "Access-Token")
+    BearerPrefix:      "Token ",           // Custom prefix (default: "Bearer ")
+    AccountIdsHeader:  "X-Account-Ids",    // Custom Account IDs header (default: "Account-Ids")
+    DefaultClientType: "WEB",              // Custom default (default: "APP")
+}
+
+strategy := auth.NewTokenAuthStrategy(authConfig)
+authenticator := auth.NewAuthenticator(constant.AuthTypeToken, strategy, 30, logger.Default())
+
+// Create server and set custom authenticator
+cfg := websocket.Config{
+    Port: 8080,
+    Path: "/ws",
+}
+
+server := websocket.NewServer(cfg, hub, adapter, logger.Default())
+server.SetAuthenticator(authenticator)
+```
+
+#### Available Generic Helper Functions
+
+**`ParseJWT[T any](token string) (*T, int64, error)`**
+- Parses JWT where the `content` field directly contains your data structure
+- Returns: parsed content, expiry timestamp (Unix seconds), error
+- Example: `{"content": {"userId": "123"}, "exp": 1234567890}`
+
+**`ParseCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error)`**
+- Parses user data from cache with complete control over cache key format
+- Application layer defines the entire cache key (no automatic prefix/separator)
+- Returns: parsed data, error
+
+#### Key Design Principles
+
+1. **No Predefined Structures**: The library defines no default user, login, or JWT payload structures
+2. **Complete Flexibility**: Define any fields, types, or nested structures you need
+3. **Full Cache Control**: Application layer defines the complete cache key format
+4. **Configurable Constants**: Token headers, Bearer prefix, Account IDs header, and client type defaults are all customizable
+5. **Type Safety**: Go generics ensure compile-time type checking
 
 ### Message Authentication (HMAC Signature)
 
@@ -603,14 +752,16 @@ type HubConfig struct {
 
 ```go
 type Config struct {
-    Port                   int    // Server port
-    Path                   string // WebSocket endpoint path
-    SessionTimeoutSeconds  int    // Session timeout
-    HeartbeatIntervalSecs  int    // Heartbeat interval
-    AuthType               string // Authentication type: "", "token", "sign"
-    PendingAuthTimeoutSecs int    // Timeout for pending authentication (seconds)
-    EnableSecurity         bool   // Enable HMAC signature verification
-    SecuritySecret         string // HMAC secret key
+    Port                   int                      // Server port
+    Path                   string                   // WebSocket endpoint path
+    SessionTimeoutSeconds  int                      // Session timeout
+    HeartbeatIntervalSecs  int                      // Heartbeat interval
+    AuthType               string                   // Authentication type: "", "token", "sign"
+    PendingAuthTimeoutSecs int                      // Timeout for pending authentication (seconds)
+    EnableSecurity         bool                     // Enable HMAC signature verification
+    SecuritySecret         string                   // HMAC secret key
+    CredentialParseFunc    auth.CredentialParseFunc // Custom token parser (required for token auth)
+    Cache                  cache.Cache              // Cache instance for authentication
 }
 ```
 

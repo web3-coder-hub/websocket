@@ -62,7 +62,11 @@ func NewServer(cfg Config, hub *Hub, adapter adapter.ServerAdapter, l logger.Log
 	if cfg.AuthType == constant.AuthTypeToken {
 		// Token 认证需要提供解析函数
 		if cfg.CredentialParseFunc != nil {
-			strategy := auth.NewTokenAuthStrategy(cfg.Cache, l, cfg.CredentialParseFunc)
+			strategy := auth.NewTokenAuthStrategy(auth.TokenAuthConfig{
+				Cache:     cfg.Cache,
+				Logger:    l,
+				ParseFunc: cfg.CredentialParseFunc,
+			})
 			authenticator = auth.NewAuthenticator(cfg.AuthType, strategy, cfg.PendingAuthTimeoutSecs, l)
 		} else {
 			// 如果没有提供解析函数，创建一个无策略的认证器
@@ -311,12 +315,13 @@ func (s *Server) authenticateClient(r *http.Request, client *Client) error {
 
 	clientId := auth.GenerateClientId(r)
 	clientIp := auth.ExtractRealIP(r)
-	accountIds := auth.ExtractHeaderOnly(r, constant.AccountIds, "")
+
+	// 获取认证策略
+	strategy := s.auth.GetStrategy()
 
 	// 设置基本信息
 	client.SetClientId(clientId)
 	client.SetClientIp(clientIp)
-	client.SetAccountIds(accountIds)
 
 	// 判断是否需要认证
 	requiresAuth := s.auth.GetAuthType() == constant.AuthTypeToken || s.auth.GetAuthType() == constant.AuthTypeSign
@@ -330,7 +335,6 @@ func (s *Server) authenticateClient(r *http.Request, client *Client) error {
 	}
 
 	// 需要认证：委托给策略处理
-	strategy := s.auth.GetStrategy()
 	if strategy != nil {
 		authenticated, err := strategy.Authenticate(r, client)
 		if err != nil {

@@ -2,7 +2,6 @@ package auth
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -73,24 +72,4 @@ func ExtractRealIP(r *http.Request) string {
 func sha256Hex(s string) string {
 	hash := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", hash)[:32]
-}
-
-// toString 将 interface{} 安全转为字符串（兼容 JSON 中数字/字符串类型）
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	switch val := v.(type) {
-	case string:
-		return val
-	case float64:
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
-		}
-		return fmt.Sprintf("%g", val)
-	case json.Number:
-		return val.String()
-	default:
-		return fmt.Sprintf("%v", val)
-	}
 }

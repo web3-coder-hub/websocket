@@ -29,6 +29,7 @@ type TokenAuthConfig struct {
 	ParseFunc         CredentialParseFunc // Token 解析函数
 	TokenHeader       string              // Token 请求头名称，默认 "Access-Token"
 	BearerPrefix      string              // Bearer 前缀，默认 "Bearer "
+	AccountIdsHeader  string              // Account IDs 请求头名称，默认 "Account-Ids"
 	DefaultClientType string              // 默认客户端类型，默认 "APP"
 }
 
@@ -39,26 +40,15 @@ type TokenAuthStrategy struct {
 	parseTokenFunc    CredentialParseFunc
 	tokenHeader       string
 	bearerPrefix      string
+	accountIdsHeader  string
 	defaultClientType string
 }
 
 // CredentialParseFunc token 解析函数类型
 type CredentialParseFunc func(token string, cache cache.Cache, logger logger.Logger) (userId, accountId, clientType string, expiry time.Time, err error)
 
-// NewTokenAuthStrategy 创建 Token 认证策略实例（使用默认配置）
-func NewTokenAuthStrategy(c cache.Cache, l logger.Logger, parseFunc CredentialParseFunc) *TokenAuthStrategy {
-	return NewTokenAuthStrategyWithConfig(TokenAuthConfig{
-		Cache:             c,
-		Logger:            l,
-		ParseFunc:         parseFunc,
-		TokenHeader:       "Access-Token",
-		BearerPrefix:      "Bearer ",
-		DefaultClientType: "APP",
-	})
-}
-
-// NewTokenAuthStrategyWithConfig 使用自定义配置创建 Token 认证策略实例
-func NewTokenAuthStrategyWithConfig(cfg TokenAuthConfig) *TokenAuthStrategy {
+// NewTokenAuthStrategy 创建 Token 认证策略实例
+func NewTokenAuthStrategy(cfg TokenAuthConfig) *TokenAuthStrategy {
 	if cfg.Logger == nil {
 		cfg.Logger = logger.Default()
 	}
@@ -75,6 +65,9 @@ func NewTokenAuthStrategyWithConfig(cfg TokenAuthConfig) *TokenAuthStrategy {
 	if cfg.BearerPrefix == "" {
 		cfg.BearerPrefix = "Bearer "
 	}
+	if cfg.AccountIdsHeader == "" {
+		cfg.AccountIdsHeader = "Account-Ids"
+	}
 	if cfg.DefaultClientType == "" {
 		cfg.DefaultClientType = "APP"
 	}
@@ -85,6 +78,7 @@ func NewTokenAuthStrategyWithConfig(cfg TokenAuthConfig) *TokenAuthStrategy {
 		parseTokenFunc:    cfg.ParseFunc,
 		tokenHeader:       cfg.TokenHeader,
 		bearerPrefix:      cfg.BearerPrefix,
+		accountIdsHeader:  cfg.AccountIdsHeader,
 		defaultClientType: cfg.DefaultClientType,
 	}
 }
@@ -120,7 +114,11 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 		clientType = s.defaultClientType
 	}
 
+	// 获取 Account IDs header
+	accountIds := ExtractHeaderOnly(r, s.accountIdsHeader, "")
+
 	// 设置认证信息
+	client.SetAccountIds(accountIds)
 	client.SetUserId(userId)
 	client.SetAccountId(accountId)
 	client.SetClientType(clientType)
@@ -185,6 +183,11 @@ func (s *TokenAuthStrategy) extractToken(r *http.Request) string {
 	return h
 }
 
+// GetAccountIdsHeader 获取 Account IDs 请求头名称
+func (s *TokenAuthStrategy) GetAccountIdsHeader() string {
+	return s.accountIdsHeader
+}
+
 // ParseJWT 解码 JWT payload（不校验签名）- 泛型版本
 // T: JWT content 字段的类型
 // 返回: content 数据、exp 时间戳（秒，0 表示无过期）、错误
@@ -207,41 +210,10 @@ func ParseJWT[T any](token string) (*T, int64, error) {
 	return &claims.Content, claims.Exp, nil
 }
 
-// ParseJWTWithStringContent 解码 JWT payload（content 为 JSON 字符串）- 泛型版本
-// T: 需要从 content 字符串解析的类型
-// 返回: 解析后的 content 数据、exp 时间戳（秒，0 表示无过期）、错误
-func ParseJWTWithStringContent[T any](token string) (*T, int64, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to decode JWT payload: %w", err)
-	}
-
-	var claims JWTPayload[string]
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT claims: %w", err)
-	}
-
-	if claims.Content == "" {
-		return nil, 0, fmt.Errorf("JWT content claim is empty")
-	}
-
-	var content T
-	if err := json.Unmarshal([]byte(claims.Content), &content); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT content: %w", err)
-	}
-
-	return &content, claims.Exp, nil
-}
-
-// ParseUserDataFromCache 从缓存中解析用户数据 - 泛型版本
+// ParseCache 从缓存中解析用户数据 - 泛型版本
 // T: 缓存中存储的用户数据类型
 // cacheKey: 完整的缓存键，由应用层决定格式
-func ParseUserDataFromCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error) {
+func ParseCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error) {
 	if c == nil {
 		return nil, fmt.Errorf("cache is nil")
 	}

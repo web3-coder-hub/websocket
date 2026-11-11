@@ -21,7 +21,11 @@ func TestNewAuthenticator(t *testing.T) {
 		parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
 			return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
 		}
-		strategy := NewTokenAuthStrategy(nil, logger.Default(), parseFunc)
+		strategy := NewTokenAuthStrategy(TokenAuthConfig{
+			Cache:     nil,
+			Logger:    logger.Default(),
+			ParseFunc: parseFunc,
+		})
 
 		auth := NewAuthenticator(constant.AuthTypeToken, strategy, 10, logger.Default())
 		if auth == nil {
@@ -61,7 +65,11 @@ func TestAuthenticatorGetters(t *testing.T) {
 	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
 		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
 	}
-	strategy := NewTokenAuthStrategy(nil, logger.Default(), parseFunc)
+	strategy := NewTokenAuthStrategy(TokenAuthConfig{
+		Cache:     nil,
+		Logger:    logger.Default(),
+		ParseFunc: parseFunc,
+	})
 	auth := NewAuthenticator(constant.AuthTypeToken, strategy, 15, logger.Default())
 
 	if auth.GetAuthType() != constant.AuthTypeToken {
@@ -311,30 +319,6 @@ func TestSha256Hex(t *testing.T) {
 	}
 }
 
-// TestToString tests toString utility
-func TestToString(t *testing.T) {
-	testCases := []struct {
-		name     string
-		input    interface{}
-		expected string
-	}{
-		{"String", "hello", "hello"},
-		{"Int", 123, "123"},
-		{"Float", 45.67, "45.67"},
-		{"Bool", true, "true"},
-		{"Nil", nil, ""},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := toString(tc.input)
-			if result != tc.expected {
-				t.Errorf("Expected %s, got %s", tc.expected, result)
-			}
-		})
-	}
-}
-
 // TestSortAndSerializeParam tests parameter sorting
 func TestSortAndSerializeParam(t *testing.T) {
 	t.Run("ValidJSON", func(t *testing.T) {
@@ -374,7 +358,11 @@ func TestTokenAuthStrategyNilLogger(t *testing.T) {
 		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
 	}
 
-	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
+	strategy := NewTokenAuthStrategy(TokenAuthConfig{
+		Cache:     nil,
+		Logger:    nil,
+		ParseFunc: parseFunc,
+	})
 
 	if strategy == nil {
 		t.Fatal("NewTokenAuthStrategy should handle nil logger")
@@ -445,7 +433,11 @@ func TestTokenAuthStrategyAuthenticate(t *testing.T) {
 		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
 	}
 
-	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
+	strategy := NewTokenAuthStrategy(TokenAuthConfig{
+		Cache:     nil,
+		Logger:    nil,
+		ParseFunc: parseFunc,
+	})
 
 	t.Run("NoToken", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/ws", nil)
@@ -492,7 +484,11 @@ func TestTokenAuthStrategyVerify(t *testing.T) {
 		return "user123", "account456", "WEB", time.Now().Add(time.Hour), nil
 	}
 
-	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
+	strategy := NewTokenAuthStrategy(TokenAuthConfig{
+		Cache:     nil,
+		Logger:    nil,
+		ParseFunc: parseFunc,
+	})
 
 	t.Run("EmptyCredential", func(t *testing.T) {
 		mockClient := &mockAuthClient{}
