@@ -23,7 +23,11 @@ func GenerateClientId(r *http.Request) string {
 func GenerateSessionId() string {
 	timestamp := time.Now().UnixNano()
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
-	return fmt.Sprintf("%d-%x", timestamp, hash[:4])[:32]
+	sessionId := fmt.Sprintf("%d-%x", timestamp, hash[:4])
+	if len(sessionId) > 32 {
+		return sessionId[:32]
+	}
+	return sessionId
 }
 
 // GenerateSessionIdFromClientId 根据 clientId 生成会话标识

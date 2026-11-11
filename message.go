@@ -109,39 +109,3 @@ type LimitOrderCancelEventData struct {
 	Language   string `json:"language,omitempty"`   // 语言代码
 	TradeToken string `json:"tradeToken,omitempty"` // BMS 交易令牌
 }
-
-const (
-	// 客户端错误 4xxx
-	ErrCodeParamInvalid = 4001 // 参数校验失败
-	ErrCodeNotLogin     = 4002 // 未登录
-	ErrCodePermission   = 4003 // 权限不足
-	ErrCodeSignInvalid  = 4004 // 签名校验失败
-	ErrCodeAuthFailed   = 4401 // 认证失败
-
-	// 服务端错误 5xxx
-	ErrCodeInternal  = 5001 // 服务内部错误
-	ErrCodeMQ        = 5002 // 消息队列错误
-	ErrCodeDatabase  = 5003 // 数据库错误
-	ErrCodeSubCenter = 5004 // 订阅中心调用失败
-)
-
-// 错误消息映射
-var ErrorMessages = map[int]string{
-	ErrCodeParamInvalid: "Parameter validation failed",
-	ErrCodeNotLogin:     "Not logged in",
-	ErrCodePermission:   "Permission denied",
-	ErrCodeSignInvalid:  "Signature verification failed",
-	ErrCodeAuthFailed:   "Authentication failed",
-	ErrCodeInternal:     "Internal server error",
-	ErrCodeMQ:           "Message queue error",
-	ErrCodeDatabase:     "Database error",
-	ErrCodeSubCenter:    "Subscription center error",
-}
-
-// GetErrorMessage 获取错误消息
-func GetErrorMessage(code int) string {
-	if msg, ok := ErrorMessages[code]; ok {
-		return msg
-	}
-	return "Unknown error"
-}

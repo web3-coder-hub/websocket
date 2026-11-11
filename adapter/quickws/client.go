@@ -3,6 +3,7 @@ package quickws
 import (
 	"bytes"
 	"compress/flate"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/antlabs/quickws"
 	"github.com/web3-coder-hub/websocket/adapter"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // ClientAdapter quickws 客户端适配器
@@ -101,7 +103,7 @@ type message struct {
 
 func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
 	if c.conn == nil {
-		return adapter.ErrConnClosed
+		return errors.New(constant.GetErrorMessage(constant.ErrCodeConnNotConnected))
 	}
 	// #nosec G115 - Opcode 转换是安全的，值域在 0-10 范围内
 	return c.conn.WriteMessage(quickws.Opcode(op), data)
@@ -109,7 +111,7 @@ func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
 
 func (c *ClientConn) WriteTimeout(op adapter.Opcode, data []byte, timeout time.Duration) error {
 	if c.conn == nil {
-		return adapter.ErrConnClosed
+		return errors.New(constant.GetErrorMessage(constant.ErrCodeConnWriteTimeout))
 	}
 	// quickws 的 WriteMessage 不支持超时，使用默认写入
 	// #nosec G115 - Opcode 转换是安全的，值域在 0-10 范围内
@@ -133,7 +135,7 @@ func (c *ClientConn) ReadMessage() (adapter.Opcode, []byte, error) {
 	case msg := <-c.readChan:
 		return msg.op, msg.data, msg.err
 	case <-c.done:
-		return 0, nil, adapter.ErrConnClosed
+		return 0, nil, errors.New(constant.GetErrorMessage(constant.ErrCodeConnClose))
 	}
 }
 

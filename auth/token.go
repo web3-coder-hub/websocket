@@ -51,9 +51,16 @@ type TokenAuthStrategy struct {
 
 // NewTokenAuthStrategy 创建 Token 认证策略实例
 func NewTokenAuthStrategy(c cache.Cache, l logger.Logger) *TokenAuthStrategy {
+	if l == nil {
+		l = logger.Default()
+	}
+	var withLogger logger.Logger
+	if l != nil {
+		withLogger = l.With(logger.Field{Key: "component", Value: "token_auth"})
+	}
 	return &TokenAuthStrategy{
 		cache:  c,
-		logger: l.With(logger.Field{Key: "component", Value: "token_auth"}),
+		logger: withLogger,
 	}
 }
 
@@ -70,10 +77,12 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 	// 解析 Token
 	userId, accountId, clientType, _, err := s.parseToken(token)
 	if err != nil {
-		s.logger.Warn("token validation failed",
-			logger.Field{Key: "error", Value: err.Error()},
-			logger.Field{Key: "remoteAddr", Value: clientIp},
-		)
+		if s.logger != nil {
+			s.logger.Warn("token validation failed",
+				logger.Field{Key: "error", Value: err.Error()},
+				logger.Field{Key: "remoteAddr", Value: clientIp},
+			)
+		}
 		return false, errTokenInvalid
 	}
 
@@ -89,11 +98,13 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 	client.SetSessionId(sha256Hex(clientType + "-" + clientId))
 	client.SetState(int32(constant.StateAuthenticated))
 
-	s.logger.Info("websocket auth success",
-		logger.Field{Key: "userId", Value: userId},
-		logger.Field{Key: "sessionId", Value: sha256Hex(clientType + "-" + clientId)},
-		logger.Field{Key: "clientIp", Value: clientIp},
-	)
+	if s.logger != nil {
+		s.logger.Info("websocket auth success",
+			logger.Field{Key: "userId", Value: userId},
+			logger.Field{Key: "sessionId", Value: sha256Hex(clientType + "-" + clientId)},
+			logger.Field{Key: "clientIp", Value: clientIp},
+		)
+	}
 
 	return true, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/web3-coder-hub/logger"
 	"github.com/web3-coder-hub/websocket/adapter"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // mockLogger 实现 logger.Logger 接口
@@ -290,7 +291,7 @@ func TestClient_SendRaw(t *testing.T) {
 		client := NewClient(cfg, &mockClientAdapter{}, &mockLogger{})
 
 		err := client.Send(map[string]any{"test": "data"})
-		if err != adapter.ErrNotConnected {
+		if err == nil || err.Error() != constant.GetErrorMessage(constant.ErrCodeConnNotConnected) {
 			t.Errorf("Expected ErrNotConnected, got %v", err)
 		}
 	})
@@ -440,7 +441,7 @@ func TestClient_Request(t *testing.T) {
 
 		ctx := context.Background()
 		_, err := client.Request(ctx, map[string]interface{}{"action": "test"})
-		if err != adapter.ErrNotConnected {
+		if err == nil || err.Error() != constant.GetErrorMessage(constant.ErrCodeConnNotConnected) {
 			t.Errorf("Expected ErrNotConnected, got %v", err)
 		}
 	})
@@ -857,7 +858,7 @@ func TestClient_ConnectionCloseDuringRequest(t *testing.T) {
 	defer cancel()
 
 	_, err := client.Request(ctx, map[string]interface{}{"action": "test"})
-	if err != adapter.ErrConnClosed {
+	if err == nil || err.Error() != constant.GetErrorMessage(constant.ErrCodeConnClose) {
 		t.Errorf("Expected ErrConnClosed, got %v", err)
 	}
 }

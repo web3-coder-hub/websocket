@@ -9,6 +9,7 @@ import (
 
 	"github.com/antlabs/quickws"
 	"github.com/web3-coder-hub/websocket/adapter"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // Mock callback for testing
@@ -398,7 +399,7 @@ func TestClientConnReadMessage(t *testing.T) {
 		close(conn.done)
 
 		_, _, err := conn.ReadMessage()
-		if err != adapter.ErrConnClosed {
+		if err == nil || err.Error() != constant.GetErrorMessage(constant.ErrCodeConnClose) {
 			t.Errorf("Expected ErrConnClosed, got %v", err)
 		}
 	})

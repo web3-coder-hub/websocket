@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/web3-coder-hub/logger"
 	"github.com/web3-coder-hub/websocket/adapter"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // Config 客户端配置
@@ -157,7 +159,7 @@ func (c *Client) Close() error {
 		close(c.done)
 
 		// 清理所有pending请求
-		c.requestManager.ClearAll(adapter.ErrConnClosed)
+		c.requestManager.ClearAll(errors.New(constant.GetErrorMessage(constant.ErrCodeConnClose)))
 
 		if c.conn != nil {
 			err = c.conn.Close()
@@ -171,7 +173,7 @@ func (c *Client) Close() error {
 // Send 发送数据（支持map[string]any自动序列化，或[]byte直接发送）
 func (c *Client) Send(data any) error {
 	if !c.connected.Load() {
-		return adapter.ErrNotConnected
+		return errors.New(constant.GetErrorMessage(constant.ErrCodeConnNotConnected))
 	}
 
 	var payload []byte
@@ -196,7 +198,7 @@ func (c *Client) Send(data any) error {
 // data 参数是业务请求数据（map格式），方法会自动注入请求ID字段
 func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]any, error) {
 	if !c.connected.Load() {
-		return nil, adapter.ErrNotConnected
+		return nil, errors.New(constant.GetErrorMessage(constant.ErrCodeConnNotConnected))
 	}
 
 	// 1. 生成请求ID
@@ -452,7 +454,7 @@ func (cb *callbackImpl) OnClose(conn adapter.ClientConn, err error) {
 	cb.client.connected.Store(false)
 
 	// 通知所有pending请求连接已关闭
-	cb.client.requestManager.ClearAll(adapter.ErrConnClosed)
+	cb.client.requestManager.ClearAll(errors.New(constant.GetErrorMessage(constant.ErrCodeConnClose)))
 
 	if err != nil {
 		cb.client.logger.Info("connection closed", logger.Field{Key: "error", Value: err.Error()})

@@ -193,7 +193,9 @@ func NewHub(cfg HubConfig, l logger.Logger) *Hub {
 
 // Run 运行 Hub（在独立的 goroutine 中）
 func (h *Hub) Run() {
-	h.logger.Info("websocket hub started")
+	if h.logger != nil {
+		h.logger.Info("websocket hub started")
+	}
 	for {
 		select {
 		case client := <-h.register:

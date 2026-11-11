@@ -10,14 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/web3-coder-hub/cache"
-	"github.com/web3-coder-hub/websocket/auth"
-	"github.com/web3-coder-hub/websocket/constant"
-
-	"github.com/antlabs/quickws"
 	"github.com/google/uuid"
 
+	"github.com/web3-coder-hub/cache"
 	"github.com/web3-coder-hub/logger"
+	"github.com/web3-coder-hub/websocket/adapter"
+	"github.com/web3-coder-hub/websocket/auth"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // MessageHandler 消息处理函数类型
@@ -47,10 +46,14 @@ type Server struct {
 	onDisconnect DisconnectHandler
 	httpServer   *http.Server
 	auth         *auth.Authenticator
+	adapter      adapter.ServerAdapter
 }
 
 // NewServer 创建 WebSocket 服务器
-func NewServer(cfg Config, hub *Hub, cache cache.Cache, l logger.Logger) *Server {
+func NewServer(cfg Config, hub *Hub, cache cache.Cache, adapter adapter.ServerAdapter, l logger.Logger) *Server {
+	if l == nil {
+		l = logger.Default()
+	}
 	authenticator := auth.NewAuthenticator(cache, cfg.AuthType, cfg.PendingAuthTimeoutSecs, l)
 	return &Server{
 		config:   cfg,
@@ -58,6 +61,7 @@ func NewServer(cfg Config, hub *Hub, cache cache.Cache, l logger.Logger) *Server
 		logger:   l,
 		handlers: make(map[string]MessageHandler),
 		auth:     authenticator,
+		adapter:  adapter,
 	}
 }
 
@@ -97,16 +101,20 @@ func (s *Server) Start() error {
 		ReadHeaderTimeout: 10 * time.Second, // 防止 Slowloris 攻击
 	}
 
-	s.logger.Info("websocket server starting",
-		logger.Field{Key: "port", Value: s.config.Port},
-		logger.Field{Key: "path", Value: s.config.Path},
-	)
+	if s.logger != nil {
+		s.logger.Info("websocket server starting",
+			logger.Field{Key: "port", Value: s.config.Port},
+			logger.Field{Key: "path", Value: s.config.Path},
+		)
+	}
 
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && errors.Is(err, http.ErrServerClosed) {
-			s.logger.Error("websocket server error",
-				logger.Field{Key: "error", Value: err.Error()},
-			)
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if s.logger != nil {
+				s.logger.Error("websocket server error",
+					logger.Field{Key: "error", Value: err.Error()},
+				)
+			}
 		}
 	}()
 
@@ -115,7 +123,9 @@ func (s *Server) Start() error {
 
 // Stop 停止服务器
 func (s *Server) Stop(ctx context.Context) error {
-	s.logger.Info("stopping websocket server")
+	if s.logger != nil {
+		s.logger.Info("stopping websocket server")
+	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
 	}
@@ -131,9 +141,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		connID: connID,
 	}
 
-	conn, err := quickws.Upgrade(w, r,
-		quickws.WithServerCallback(callback),
-	)
+	conn, err := s.adapter.Upgrade(w, r, callback)
 	if err != nil {
 		s.logger.Error("websocket upgrade failed",
 			logger.Field{Key: "error", Value: err.Error()},
@@ -174,16 +182,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.StartReadLoop()
 }
 
-// wsCallback quickws 回调实现
+// wsCallback 适配器回调实现
 type wsCallback struct {
 	server *Server
 	connID string
 	client *Client
 }
 
-func (c *wsCallback) OnOpen(_ *quickws.Conn) {}
+func (c *wsCallback) OnOpen(_ adapter.ServerConn) {}
 
-func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
+func (c *wsCallback) OnMessage(_ adapter.ServerConn, op adapter.Opcode, data []byte) {
 	if c.client == nil {
 		return
 	}
@@ -192,7 +200,7 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 
 	var msg ClientMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		c.client.SendError("", ErrCodeParamInvalid, "Invalid message format")
+		c.client.SendError("", constant.ErrCodeParamInvalid, "Invalid message format")
 		return
 	}
 
@@ -206,7 +214,7 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 	// 消息签名校验（非心跳事件，开启 security 时）
 	if c.server.config.EnableSecurity {
 		if !c.server.verifyMessageSign(c.client, &msg) {
-			c.client.SendError(msg.EventType, ErrCodeSignInvalid, GetErrorMessage(ErrCodeSignInvalid))
+			c.client.SendError(msg.EventType, constant.ErrCodeSignInvalid, constant.GetErrorMessage(constant.ErrCodeSignInvalid))
 			return
 		}
 	}
@@ -214,12 +222,12 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 	// 待认证超时检查：如果客户端处于待认证状态且已超时，拒绝所有非 LOGIN 事件
 	if c.client.IsPendingAuth() && msg.EventType != constant.EventLogin {
 		if c.client.IsAuthExpired() {
-			c.client.SendError(msg.EventType, ErrCodeAuthFailed, "Authentication timeout, connection will be closed")
+			c.client.SendError(msg.EventType, constant.ErrCodeAuthFailed, "Authentication timeout, connection will be closed")
 			c.client.Close()
 			return
 		}
 		// 待认证期间只允许 LOGIN 事件
-		c.client.SendError(msg.EventType, ErrCodeNotLogin, "Please login first")
+		c.client.SendError(msg.EventType, constant.ErrCodeNotLogin, "Please login first")
 		return
 	}
 
@@ -233,20 +241,20 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 	// 检查登录状态（需要认证时）
 	requiresAuth := c.server.config.AuthType == constant.AuthTypeToken || c.server.config.AuthType == constant.AuthTypeSign
 	if requiresAuth && !c.client.IsLoggedIn() && msg.EventType != constant.EventLogin {
-		c.client.SendError(msg.EventType, ErrCodeNotLogin, GetErrorMessage(ErrCodeNotLogin))
+		c.client.SendError(msg.EventType, constant.ErrCodeNotLogin, constant.GetErrorMessage(constant.ErrCodeNotLogin))
 		return
 	}
 
 	// 认证过期检查：已认证但状态为过期，拒绝非 login 事件
 	if msg.EventType != constant.EventLogin && c.client.IsAuthExpired() {
-		c.client.SendError(msg.EventType, ErrCodeAuthFailed, "Authentication expired, please re-login")
+		c.client.SendError(msg.EventType, constant.ErrCodeAuthFailed, "Authentication expired, please re-login")
 		return
 	}
 
 	// 执行处理器
 	handler, ok := c.server.getHandler(msg.EventType)
 	if !ok {
-		c.client.SendError(msg.EventType, ErrCodeParamInvalid, "Unknown event type")
+		c.client.SendError(msg.EventType, constant.ErrCodeParamInvalid, "Unknown event type")
 		return
 	}
 
@@ -258,7 +266,7 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 	}
 }
 
-func (c *wsCallback) OnClose(_ *quickws.Conn, _ error) {
+func (c *wsCallback) OnClose(_ adapter.ServerConn, _ error) {
 	if c.client == nil {
 		return
 	}
@@ -342,7 +350,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 	// 待认证状态：必须提供凭证完成认证
 	if client.IsPendingAuth() {
 		if msg.Token == "" {
-			client.SendError(constant.EventLogin, ErrCodeAuthFailed, "Credential is required for authentication")
+			client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, "Credential is required for authentication")
 			return fmt.Errorf("credential required for pending auth")
 		}
 
@@ -351,7 +359,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 				logger.Field{Key: "sessionId", Value: client.SessionId},
 				logger.Field{Key: "error", Value: err.Error()},
 			)
-			client.SendError(constant.EventLogin, ErrCodeAuthFailed, "Credential verification failed")
+			client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, "Credential verification failed")
 			return err
 		}
 
@@ -374,7 +382,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 		if client.IsAuthExpired() {
 			errMsg = "Authentication expired, please provide a new credential"
 		}
-		client.SendError(constant.EventLogin, ErrCodeAuthFailed, errMsg)
+		client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, errMsg)
 		return fmt.Errorf("credential required: auth expired or not set")
 	}
 
@@ -383,7 +391,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 			logger.Field{Key: "sessionId", Value: client.SessionId},
 			logger.Field{Key: "error", Value: err.Error()},
 		)
-		client.SendError(constant.EventLogin, ErrCodeAuthFailed, "credential verification failed")
+		client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, "credential verification failed")
 		return err
 	}
 

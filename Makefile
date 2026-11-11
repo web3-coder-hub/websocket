@@ -14,6 +14,11 @@ test:
 	@echo "Running tests..."
 	go test -v ./...
 
+.PHONY: bench
+bench:
+	@echo "Running benchmarks..."
+	go test -bench=. -benchmem ./...
+
 .PHONY: lint
 lint:
 	@echo "Running linters..."

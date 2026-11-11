@@ -55,6 +55,15 @@ func NewAuthenticator(c cache.Cache, authType string, pendingAuthTimeoutSecs int
 		pendingAuthTimeoutSecs = 10 // 默认 10 秒
 	}
 
+	if l == nil {
+		l = logger.Default()
+	}
+
+	var withLogger logger.Logger
+	if l != nil {
+		withLogger = l.With(logger.Field{Key: "component", Value: "authenticator"})
+	}
+
 	// 根据认证类型创建对应的策略
 	var strategy AuthStrategy
 	switch authType {
@@ -71,7 +80,7 @@ func NewAuthenticator(c cache.Cache, authType string, pendingAuthTimeoutSecs int
 		strategy:               strategy,
 		authType:               authType,
 		pendingAuthTimeoutSecs: pendingAuthTimeoutSecs,
-		logger:                 l.With(logger.Field{Key: "component", Value: "authenticator"}),
+		logger:                 withLogger,
 	}
 }
 

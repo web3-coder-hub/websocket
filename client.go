@@ -6,12 +6,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/web3-coder-hub/logger"
+	"github.com/web3-coder-hub/websocket/adapter"
 	"github.com/web3-coder-hub/websocket/auth"
 	"github.com/web3-coder-hub/websocket/constant"
-
-	"github.com/antlabs/quickws"
-
-	"github.com/web3-coder-hub/logger"
 )
 
 // Client 表示一个 WebSocket 客户端连接
@@ -30,7 +28,7 @@ type Client struct {
 	RemoteAddr string   // 客户端远程地址（IP:Port）
 
 	// WebSocket 连接
-	conn *quickws.Conn
+	conn adapter.ServerConn
 
 	// Hub 引用
 	hub *Hub
@@ -116,7 +114,7 @@ func (c *Client) IsAuthValid() bool {
 }
 
 // NewClient 创建新的客户端实例
-func NewClient(id string, conn *quickws.Conn, hub *Hub, cfg HubConfig, l logger.Logger, heartbeatInterval time.Duration, wsPath string) *Client {
+func NewClient(id string, conn adapter.ServerConn, hub *Hub, cfg HubConfig, l logger.Logger, heartbeatInterval time.Duration, wsPath string) *Client {
 	c := &Client{
 		ID:                id,
 		conn:              conn,
@@ -311,7 +309,7 @@ func (c *Client) HeartbeatPump() {
 func (c *Client) WritePump() {
 	defer c.Close()
 	for message := range c.send {
-		if err := c.conn.WriteTimeout(quickws.Text, message, c.writeWait); err != nil {
+		if err := c.conn.WriteTimeout(adapter.Text, message, c.writeWait); err != nil {
 			return
 		}
 	}
