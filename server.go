@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -25,15 +26,15 @@ type MessageHandler func(client *Client, msg *ClientMessage) error
 // DisconnectHandler 断开连接事件处理函数类型
 type DisconnectHandler func(client *Client)
 
-// Config WebSocket配置
 type Config struct {
-	Port                  int    `yaml:"port"`
-	Path                  string `yaml:"path"`
-	SessionTimeoutSeconds int    `yaml:"session_timeout_seconds"`
-	HeartbeatIntervalSecs int    `yaml:"heartbeat_interval_seconds"`
-	MustLogin             bool   `yaml:"must_login"`
-	EnableSecurity        bool   `yaml:"enable_security"`
-	SecuritySecret        string `yaml:"security_secret"`
+	Port                   int    `yaml:"port"`
+	Path                   string `yaml:"path"`
+	SessionTimeoutSeconds  int    `yaml:"session_timeout_seconds"`
+	HeartbeatIntervalSecs  int    `yaml:"heartbeat_interval_seconds"`
+	AuthType               string `yaml:"auth_type"`                    // 认证类型：空=不认证，token=Token认证，sign=签名认证
+	PendingAuthTimeoutSecs int    `yaml:"pending_auth_timeout_seconds"` // 待认证状态超时时间（秒），默认 10 秒
+	EnableSecurity         bool   `yaml:"enable_security"`
+	SecuritySecret         string `yaml:"security_secret"`
 }
 
 // Server WebSocket 服务器
@@ -50,7 +51,7 @@ type Server struct {
 
 // NewServer 创建 WebSocket 服务器
 func NewServer(cfg Config, hub *Hub, cache cache.Cache, l logger.Logger) *Server {
-	authenticator := auth.NewAuthenticator(cache, cfg.MustLogin, l)
+	authenticator := auth.NewAuthenticator(cache, cfg.AuthType, cfg.PendingAuthTimeoutSecs, l)
 	return &Server{
 		config:   cfg,
 		hub:      hub,
@@ -102,7 +103,7 @@ func (s *Server) Start() error {
 	)
 
 	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.ListenAndServe(); err != nil && errors.Is(err, http.ErrServerClosed) {
 			s.logger.Error("websocket server error",
 				logger.Field{Key: "error", Value: err.Error()},
 			)
@@ -123,16 +124,6 @@ func (s *Server) Stop(ctx context.Context) error {
 
 // handleWebSocket 处理 WebSocket 连接请求
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	authResult, err := s.auth.Authenticate(r)
-	if err != nil {
-		s.logger.Warn("websocket auth failed",
-			logger.Field{Key: "remoteAddr", Value: r.RemoteAddr},
-			logger.Field{Key: "error", Value: err.Error()},
-		)
-		auth.SendAuthError(w, err)
-		return
-	}
-
 	connID := uuid.New().String()
 
 	callback := &wsCallback{
@@ -155,15 +146,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsPath := path.Base(s.config.Path)
 	client := NewClient(connID, conn, s.hub, s.hub.config, s.logger, heartbeatInterval, wsPath)
 	client.RemoteAddr = r.RemoteAddr
-
-	client.SessionId = authResult.UserSessionId
-	client.ClientId = authResult.ClientId
-	client.ClientType = authResult.ClientType
-	client.RemoteAddr = authResult.ClientIp
-	client.UserId = authResult.UserId
-	client.AccountId = authResult.AccountId
-	client.AuthExpiry = authResult.TokenExpiry
 	callback.client = client
+
+	// 认证处理
+	if err := s.authenticateClient(r, client); err != nil {
+		s.logger.Warn("websocket auth failed",
+			logger.Field{Key: "remoteAddr", Value: r.RemoteAddr},
+			logger.Field{Key: "error", Value: err.Error()},
+		)
+		auth.SendAuthError(w, err)
+		return
+	}
 
 	s.hub.Register(client)
 	go client.WritePump()
@@ -173,9 +166,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("websocket client connected",
 		logger.Field{Key: "connId", Value: connID},
-		logger.Field{Key: "clientId", Value: authResult.ClientId},
-		logger.Field{Key: "sessionId", Value: authResult.UserSessionId},
-		logger.Field{Key: "clientIp", Value: authResult.ClientIp},
+		logger.Field{Key: "clientId", Value: client.ClientId},
+		logger.Field{Key: "sessionId", Value: client.SessionId},
+		logger.Field{Key: "clientIp", Value: client.ClientIp},
 	)
 
 	conn.StartReadLoop()
@@ -218,21 +211,34 @@ func (c *wsCallback) OnMessage(_ *quickws.Conn, _ quickws.Opcode, data []byte) {
 		}
 	}
 
-	// LOGIN 事件：JWT Token 二次校验 + accountId 覆盖
+	// 待认证超时检查：如果客户端处于待认证状态且已超时，拒绝所有非 LOGIN 事件
+	if c.client.IsPendingAuth() && msg.EventType != constant.EventLogin {
+		if c.client.IsAuthExpired() {
+			c.client.SendError(msg.EventType, ErrCodeAuthFailed, "Authentication timeout, connection will be closed")
+			c.client.Close()
+			return
+		}
+		// 待认证期间只允许 LOGIN 事件
+		c.client.SendError(msg.EventType, ErrCodeNotLogin, "Please login first")
+		return
+	}
+
+	// LOGIN 事件：凭证校验
 	if msg.EventType == constant.EventLogin {
-		if err := c.server.validateLoginToken(c.client, &msg); err != nil {
+		if err := c.server.validateCredential(c.client, &msg); err != nil {
 			return
 		}
 	}
 
-	// 检查登录状态
-	if c.server.config.MustLogin && !c.client.IsLoggedIn() && msg.EventType != constant.EventLogin {
+	// 检查登录状态（需要认证时）
+	requiresAuth := c.server.config.AuthType == constant.AuthTypeToken || c.server.config.AuthType == constant.AuthTypeSign
+	if requiresAuth && !c.client.IsLoggedIn() && msg.EventType != constant.EventLogin {
 		c.client.SendError(msg.EventType, ErrCodeNotLogin, GetErrorMessage(ErrCodeNotLogin))
 		return
 	}
 
-	// 认证过期检查：已登录但 Token 已过期，拒绝非 login 事件，提示客户端重新 login
-	if msg.EventType != constant.EventLogin && !c.client.AuthExpiry.IsZero() && time.Now().After(c.client.AuthExpiry) {
+	// 认证过期检查：已认证但状态为过期，拒绝非 login 事件
+	if msg.EventType != constant.EventLogin && c.client.IsAuthExpired() {
 		c.client.SendError(msg.EventType, ErrCodeAuthFailed, "Authentication expired, please re-login")
 		return
 	}
@@ -269,47 +275,117 @@ func (c *wsCallback) OnClose(_ *quickws.Conn, _ error) {
 	)
 }
 
-// validateLoginToken 在 LOGIN 事件中校验认证状态。
-// 如果握手/上次 login 的认证缓存仍有效（JWT 未过期），直接跳过 Token 校验；
-// 如果已过期或从未认证，要求客户端携带新 Token 并刷新缓存。
-func (s *Server) validateLoginToken(client *Client, msg *ClientMessage) error {
+// authenticateClient 在 WebSocket 升级后处理客户端认证
+func (s *Server) authenticateClient(r *http.Request, client *Client) error {
+	// 未配置认证器：生成匿名会话标识
+	if s.auth == nil {
+		client.SetSessionId(auth.GenerateSessionId())
+		return nil
+	}
+
+	clientId := auth.GenerateClientId(r)
+	clientIp := auth.ExtractRealIP(r)
+	accountIds := auth.ExtractHeaderOnly(r, constant.AccountIds, "")
+
+	// 设置基本信息
+	client.SetClientId(clientId)
+	client.SetClientIp(clientIp)
+	client.SetAccountIds(accountIds)
+
+	// 判断是否需要认证
+	requiresAuth := s.auth.GetAuthType() == constant.AuthTypeToken || s.auth.GetAuthType() == constant.AuthTypeSign
+
+	// 无需认证：允许匿名连接
+	if !requiresAuth {
+		client.SetClientType(constant.DefaultClientType)
+		client.SetSessionId(auth.GenerateSessionIdFromClientId(clientId))
+		client.SetState(int32(constant.StateConnected))
+		return nil
+	}
+
+	// 需要认证：委托给策略处理
+	strategy := s.auth.GetStrategy()
+	if strategy != nil {
+		authenticated, err := strategy.Authenticate(r, client)
+		if err != nil {
+			return err
+		}
+		if authenticated {
+			return nil
+		}
+	}
+
+	// 策略未认证：设置为待认证状态，允许后续通过 LOGIN 事件认证
+	client.SetClientType(constant.DefaultClientType)
+	client.SetSessionId(auth.GenerateSessionIdFromClientId(clientId))
+	client.SetAuthDeadline(time.Now().Add(time.Duration(s.auth.GetPendingAuthTimeout()) * time.Second))
+	client.SetState(int32(constant.StatePendingAuth))
+	return nil
+}
+
+// validateCredential 在 LOGIN 事件中校验凭证并更新客户端认证状态。
+// 处理三种情况：
+// 1. 待认证状态（StatePendingAuth）：强制要求提供有效凭证并完成认证
+// 2. 认证已过期：要求提供新凭证刷新认证
+// 3. 认证有效：跳过凭证校验
+// 凭证类型取决于认证策略（token/sign 等），从凭证中解析的信息会更新客户端状态
+func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 	if s.auth == nil {
 		return nil
 	}
 
-	// 认证缓存仍有效 → 跳过 Token 校验
+	strategy := s.auth.GetStrategy()
+	if strategy == nil {
+		return nil
+	}
+
+	// 待认证状态：必须提供凭证完成认证
+	if client.IsPendingAuth() {
+		if msg.Token == "" {
+			client.SendError(constant.EventLogin, ErrCodeAuthFailed, "Credential is required for authentication")
+			return fmt.Errorf("credential required for pending auth")
+		}
+
+		if err := strategy.Verify(msg.Token, client); err != nil {
+			s.logger.Warn("pending auth credential verification failed",
+				logger.Field{Key: "sessionId", Value: client.SessionId},
+				logger.Field{Key: "error", Value: err.Error()},
+			)
+			client.SendError(constant.EventLogin, ErrCodeAuthFailed, "Credential verification failed")
+			return err
+		}
+
+		s.logger.Info("pending auth completed",
+			logger.Field{Key: "sessionId", Value: client.SessionId},
+			logger.Field{Key: "userId", Value: client.UserId},
+			logger.Field{Key: "clientType", Value: client.ClientType},
+		)
+		return nil
+	}
+
+	// 认证缓存仍有效 → 跳过凭证校验
 	if client.IsAuthValid() {
 		return nil
 	}
 
-	// 过期或未认证 → 要求新 Token
+	// 过期或未认证 → 要求新凭证
 	if msg.Token == "" {
-		errMsg := "token is required"
-		if !client.AuthExpiry.IsZero() {
-			errMsg = "Authentication expired, please provide a new token"
+		errMsg := "credential is required"
+		if client.IsAuthExpired() {
+			errMsg = "Authentication expired, please provide a new credential"
 		}
 		client.SendError(constant.EventLogin, ErrCodeAuthFailed, errMsg)
-		return fmt.Errorf("token required: auth expired or not set")
+		return fmt.Errorf("credential required: auth expired or not set")
 	}
 
-	result, err := s.auth.ValidateToken(msg.Token)
-	if err != nil {
-		s.logger.Warn("login token validation failed",
+	if err := strategy.Verify(msg.Token, client); err != nil {
+		s.logger.Warn("login credential verification failed",
 			logger.Field{Key: "sessionId", Value: client.SessionId},
 			logger.Field{Key: "error", Value: err.Error()},
 		)
-		client.SendError(constant.EventLogin, ErrCodeAuthFailed, "token validation failed")
+		client.SendError(constant.EventLogin, ErrCodeAuthFailed, "credential verification failed")
 		return err
 	}
-
-	// 刷新 Client 上的认证缓存
-	if result.UserId != "" {
-		client.UserId = result.UserId
-	}
-	if result.AccountId != "" {
-		client.AccountId = result.AccountId
-	}
-	client.AuthExpiry = result.TokenExpiry
 
 	return nil
 }

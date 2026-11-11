@@ -1,79 +1,78 @@
 package auth
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/web3-coder-hub/cache"
 	"github.com/web3-coder-hub/logger"
+	"github.com/web3-coder-hub/websocket/constant"
 )
 
-const (
-	tokenHeader      = "Access-Token"
-	accountIdsHeader = "Account-Ids"
-	bearerPrefix     = "Bearer "
-
-	defaultClientType = "APP"
-
-	// cache 缓存名称
-	userDataCacheName = "User_Data"
-)
+// AuthStrategy 认证策略接口
+type AuthStrategy interface {
+	// Authenticate 执行认证逻辑，返回是否成功认证
+	Authenticate(r *http.Request, client AuthClient) (authenticated bool, err error)
+	// Verify 验证凭证并更新客户端认证信息（用于 LOGIN 事件）
+	Verify(credential string, client AuthClient) error
+}
 
 // Authenticator WebSocket 连接层认证器
-// 负责在 WebSocket 握手阶段验证 JWT Token，通过缓存读取用户数据，
 type Authenticator struct {
-	cache     cache.Cache
-	logger    logger.Logger
-	mustLogin bool
+	strategy               AuthStrategy
+	authType               string // 认证类型：空=不认证，token=Token认证，sign=签名认证
+	pendingAuthTimeoutSecs int    // 待认证状态的超时时间（秒）
+	logger                 logger.Logger
+}
+
+// AuthClient 定义可被认证的对象接口
+// 实现此接口的类型可以被 Authenticator 进行认证和授权操作
+type AuthClient interface {
+	// 设置认证信息
+	SetSessionId(sessionId string)
+	SetUserId(userId string)
+	SetAccountId(accountId string)
+	SetClientId(clientId string)
+	SetClientIp(clientIp string)
+	SetClientType(clientType string)
+	SetAccountIds(accountIds string)
+	SetAuthDeadline(deadline time.Time)
+
+	// 状态管理
+	SetState(state int32)
+	GetState() int32
+
+	// 获取认证信息
+	GetClientId() string
+	GetClientType() string
+	GetClientIp() string
 }
 
 // NewAuthenticator 创建认证器实例
-func NewAuthenticator(c cache.Cache, mustLogin bool, l logger.Logger) *Authenticator {
-	return &Authenticator{
-		cache:     c,
-		mustLogin: mustLogin,
-		logger:    l.With(logger.Field{Key: "component", Value: "authenticator"}),
+func NewAuthenticator(c cache.Cache, authType string, pendingAuthTimeoutSecs int, l logger.Logger) *Authenticator {
+	if pendingAuthTimeoutSecs <= 0 {
+		pendingAuthTimeoutSecs = 10 // 默认 10 秒
 	}
-}
 
-// AuthResult 认证成功后返回的完整用户数据
-type AuthResult struct {
-	UserSessionId string    // SHA256(clientType + "-" + clientId)[:32]
-	UserId        string    // 用户ID，来自 Redis UserData
-	AccountId     string    // 账户ID，来自 Redis UserData
-	ClientId      string    // 客户端标识
-	ClientIp      string    // 客户端真实 IP
-	ClientType    string    // 客户端类型（APP/WEB/BMS 等）
-	AccountIds    string    // 多账户 ID 列表
-	TokenExpiry   time.Time // JWT 过期时间，零值表示无 Token 或 Token 中无 exp
-}
+	// 根据认证类型创建对应的策略
+	var strategy AuthStrategy
+	switch authType {
+	case constant.AuthTypeToken:
+		strategy = NewTokenAuthStrategy(c, l)
+	case constant.AuthTypeSign:
+		// TODO: 实现签名认证策略
+		strategy = nil
+	default:
+		strategy = nil // 无需认证
+	}
 
-// jwtPayload JWT payload 结构，上游认证系统将用户信息序列化为 content 字段
-type jwtPayload struct {
-	Content string `json:"content"`
-	Exp     int64  `json:"exp,omitempty"`
-	Iat     int64  `json:"iat,omitempty"`
-}
-
-// loginUser 从 JWT content 字段反序列化的用户身份信息
-type loginUser struct {
-	Name         string `json:"name"`
-	ClientType   string `json:"clientType"`
-	DataCacheKey string `json:"dataCacheKey"`
-	AuthCacheKey string `json:"authCacheKey"`
-}
-
-// userData Redis 缓存中的用户数据
-type userData struct {
-	UserId interface{} `json:"userId"`
-	ActId  interface{} `json:"actId"`
+	return &Authenticator{
+		strategy:               strategy,
+		authType:               authType,
+		pendingAuthTimeoutSecs: pendingAuthTimeoutSecs,
+		logger:                 l.With(logger.Field{Key: "component", Value: "authenticator"}),
+	}
 }
 
 // AuthError 认证错误，包含 HTTP 状态码和业务错误码
@@ -87,139 +86,28 @@ func (e *AuthError) Error() string {
 	return e.Message
 }
 
-var (
-	errTokenMissing = &AuthError{StatusCode: http.StatusUnauthorized, Code: "AUTH_TOKEN_MISSING", Message: "Access-Token is required"}
-	errTokenInvalid = &AuthError{StatusCode: http.StatusUnauthorized, Code: "AUTH_TOKEN_INVALID", Message: "Access-Token is invalid or expired"}
-)
-
-// Authenticate 在 WebSocket 升级前验证 HTTP 请求。
-// 支持 nil receiver：当未配置 Authenticator 时，由库自动生成匿名会话标识
-func (a *Authenticator) Authenticate(r *http.Request) (*AuthResult, error) {
-	// nil receiver：自动生成匿名会话标识
+// GetStrategy 获取认证策略
+func (a *Authenticator) GetStrategy() AuthStrategy {
 	if a == nil {
-		return &AuthResult{
-			UserSessionId: generateSessionId(),
-		}, nil
+		return nil
 	}
-
-	clientId := generateClientId(r)
-	clientIp := extractRealIP(r)
-	accountIds := extractHeaderOnly(r, accountIdsHeader, "")
-	token := extractToken(r)
-
-	// mustLogin=false 且无 Token：允许匿名连接
-	if token == "" {
-		if a.mustLogin {
-			return nil, errTokenMissing
-		}
-		return &AuthResult{
-			UserSessionId: sha256Hex(defaultClientType + "-" + clientId),
-			ClientId:      clientId,
-			ClientIp:      clientIp,
-			ClientType:    defaultClientType,
-			AccountIds:    accountIds,
-		}, nil
-	}
-
-	userId, accountId, clientType, expiry, err := a.parseToken(token)
-	if err != nil {
-		a.logger.Warn("token validation failed",
-			logger.Field{Key: "error", Value: err.Error()},
-			logger.Field{Key: "remoteAddr", Value: clientIp},
-		)
-		return nil, errTokenInvalid
-	}
-
-	// 如果 token 中未提供 clientType，使用默认值
-	if clientType == "" {
-		clientType = defaultClientType
-	}
-
-	result := &AuthResult{
-		UserSessionId: sha256Hex(clientType + "-" + clientId),
-		UserId:        userId,
-		AccountId:     accountId,
-		ClientId:      clientId,
-		ClientIp:      clientIp,
-		ClientType:    clientType,
-		AccountIds:    accountIds,
-		TokenExpiry:   expiry,
-	}
-
-	a.logger.Info("websocket auth success",
-		logger.Field{Key: "userId", Value: result.UserId},
-		logger.Field{Key: "sessionId", Value: result.UserSessionId},
-		logger.Field{Key: "clientIp", Value: clientIp},
-	)
-
-	return result, nil
+	return a.strategy
 }
 
-// ValidateToken 校验 JWT Token 并通过 Redis 获取用户数据。
-// 用于 LOGIN 事件中的二次身份校验，与握手阶段共享同一套 JWT + Redis 逻辑。
-func (a *Authenticator) ValidateToken(token string) (*AuthResult, error) {
+// GetAuthType 获取认证类型
+func (a *Authenticator) GetAuthType() string {
 	if a == nil {
-		return nil, fmt.Errorf("authenticator not configured")
+		return ""
 	}
-	if token == "" {
-		return nil, fmt.Errorf("token is required")
-	}
-
-	userId, accountId, clientType, expiry, err := a.parseToken(token)
-	if err != nil {
-		return nil, err
-	}
-
-	return &AuthResult{
-		UserId:      userId,
-		AccountId:   accountId,
-		ClientType:  clientType,
-		TokenExpiry: expiry,
-	}, nil
+	return a.authType
 }
 
-// parseToken 解析 JWT 并通过 Redis 查询用户数据。
-// 返回 userId/accountId/clientType 以及 JWT 过期时间。
-func (a *Authenticator) parseToken(token string) (userId, accountId, clientType string, expiry time.Time, err error) {
-	lu, exp, err := parseJWT(token)
-	if err != nil {
-		return "", "", "", time.Time{}, err
+// GetPendingAuthTimeout 获取待认证超时时间（秒）
+func (a *Authenticator) GetPendingAuthTimeout() int {
+	if a == nil {
+		return 0
 	}
-
-	if exp > 0 {
-		expiry = time.Unix(exp, 0)
-	}
-
-	clientType = lu.ClientType
-
-	if a.cache == nil || lu.DataCacheKey == "" {
-		return "", "", clientType, expiry, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	cacheKey := userDataCacheName + "::" + lu.DataCacheKey
-	raw, exists, cacheErr := a.cache.Get(ctx, cacheKey)
-	if cacheErr != nil {
-		return "", "", "", time.Time{}, fmt.Errorf("cache lookup failed: %w", cacheErr)
-	}
-	if !exists {
-		return "", "", "", time.Time{}, fmt.Errorf("user data not found in cache, token may be expired")
-	}
-
-	var ud userData
-	if err := json.Unmarshal(raw, &ud); err != nil {
-		a.logger.Warn("failed to unmarshal UserData from cache",
-			logger.Field{Key: "cacheKey", Value: cacheKey},
-			logger.Field{Key: "error", Value: err.Error()},
-		)
-		return "", "", clientType, expiry, nil
-	}
-
-	userId = toString(ud.UserId)
-	accountId = toString(ud.ActId)
-	return userId, accountId, clientType, expiry, nil
+	return a.pendingAuthTimeoutSecs
 }
 
 // SendAuthError 向客户端写入认证失败的 HTTP JSON 响应
@@ -239,124 +127,4 @@ func SendAuthError(w http.ResponseWriter, err error) {
 		"timestamp": time.Now().UnixMilli(),
 	}
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-//  参数提取
-
-// extractToken 从请求头中提取 Access-Token，支持 Bearer 前缀
-// 安全考虑：仅支持请求头方式，避免敏感 Token 出现在 URL 中被日志记录或泄露
-func extractToken(r *http.Request) string {
-	h := r.Header.Get(tokenHeader)
-	if h == "" {
-		return ""
-	}
-	if strings.HasPrefix(h, bearerPrefix) {
-		return h[len(bearerPrefix):]
-	}
-	return h
-}
-
-// generateClientId 通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成客户端标识
-func generateClientId(r *http.Request) string {
-	fingerprint := r.UserAgent() + "|" + extractRealIP(r)
-	return sha256Hex(fingerprint)
-}
-
-// generateSessionId 生成随机会话标识（用于未配置认证器时的匿名会话）
-func generateSessionId() string {
-	timestamp := time.Now().UnixNano()
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
-	return fmt.Sprintf("%d-%x", timestamp, hash[:4])[:32]
-}
-
-// extractHeaderOnly 仅从请求头中提取指定参数，不支持查询参数
-// 用于敏感信息（如 Account-Ids）以避免在 URL 中暴露
-func extractHeaderOnly(r *http.Request, name, defaultVal string) string {
-	if h := r.Header.Get(name); h != "" {
-		return h
-	}
-	return defaultVal
-}
-
-// extractRealIP 提取客户端真实 IP，支持反向代理头
-// 优先级：X-Forwarded-For > X-Real-IP > Proxy-Client-IP > WL-Proxy-Client-IP > RemoteAddr
-func extractRealIP(r *http.Request) string {
-	for _, header := range []string{"X-Forwarded-For", "X-Real-IP", "Proxy-Client-IP", "WL-Proxy-Client-IP"} {
-		if val := r.Header.Get(header); val != "" {
-			// X-Forwarded-For 可能包含多个 IP（逗号分隔），取第一个
-			if idx := strings.IndexByte(val, ','); idx > 0 {
-				val = val[:idx]
-			}
-			ip := strings.TrimSpace(val)
-			if ip != "" && ip != "unknown" {
-				return ip
-			}
-		}
-	}
-
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
-//  JWT 解析
-
-// parseJWT 解码 JWT payload（不校验签名），返回 loginUser 和 exp 时间戳（秒，0 表示无过期）
-func parseJWT(token string) (*loginUser, int64, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to decode JWT payload: %w", err)
-	}
-
-	var claims jwtPayload
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT claims: %w", err)
-	}
-
-	if claims.Content == "" {
-		return nil, 0, fmt.Errorf("JWT content claim is empty")
-	}
-
-	var lu loginUser
-	if err := json.Unmarshal([]byte(claims.Content), &lu); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT content: %w", err)
-	}
-
-	return &lu, claims.Exp, nil
-}
-
-//  工具函数
-
-// sha256Hex 计算 SHA256 并返回前 32 位小写十六进制字符串（用于会话 ID 生成）
-// #nosec G401 - SHA256 用于非加密场景的会话 ID 生成，不需要更强的加密算法
-func sha256Hex(s string) string {
-	hash := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", hash)[:32]
-}
-
-// toString 将 interface{} 安全转为字符串（兼容 JSON 中数字/字符串类型）
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	switch val := v.(type) {
-	case string:
-		return val
-	case float64:
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
-		}
-		return fmt.Sprintf("%g", val)
-	case json.Number:
-		return val.String()
-	default:
-		return fmt.Sprintf("%v", val)
-	}
 }

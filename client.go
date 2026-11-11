@@ -6,20 +6,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/web3-coder-hub/websocket/auth"
 	"github.com/web3-coder-hub/websocket/constant"
 
 	"github.com/antlabs/quickws"
 
 	"github.com/web3-coder-hub/logger"
-)
-
-// ClientState 客户端状态
-type ClientState int32
-
-const (
-	StateConnected ClientState = iota // 已连接
-	StateLoggedIn                     // 已登录
-	StateClosed                       // 已关闭
 )
 
 // Client 表示一个 WebSocket 客户端连接
@@ -34,7 +26,7 @@ type Client struct {
 	AccountIds []string // 所有账户ID列表
 	ClientId   string   // 客户端ID
 	ClientType string   // 客户端类型（APP/WEB/BMS 等）
-	IsBmsLogin bool     // 是否 BMS 后台代操登录
+	ClientIp   string   // 客户端真实 IP
 	RemoteAddr string   // 客户端远程地址（IP:Port）
 
 	// WebSocket 连接
@@ -64,12 +56,63 @@ type Client struct {
 	heartbeatReset    chan struct{}
 	wsPath            string
 
-	// 认证缓存：握手阶段 Token 校验成功后写入，后续事件直接复用，避免重复 Redis 查询
-	AuthExpiry time.Time // JWT 过期时间，零值表示未经过 Token 认证（匿名连接）
+	// 认证信息
+	AuthDeadline time.Time // 认证截止时间（用于待认证状态的超时控制）
+	accountIds   string    // 多账户 ID 列表（逗号分隔）
 
 	// 连接时间
 	ConnectedAt time.Time
 	lastPingAt  atomic.Int64 // Unix 纳秒时间戳
+}
+
+// 确保 Client 实现了 auth.AuthClient 接口
+var _ auth.AuthClient = (*Client)(nil)
+
+// 实现 auth.AuthClient 接口
+
+func (c *Client) SetSessionId(sessionId string)      { c.SessionId = sessionId }
+func (c *Client) SetUserId(userId string)            { c.UserId = userId }
+func (c *Client) SetAccountId(accountId string)      { c.AccountId = accountId }
+func (c *Client) SetClientId(clientId string)        { c.ClientId = clientId }
+func (c *Client) SetClientIp(clientIp string)        { c.ClientIp = clientIp }
+func (c *Client) SetClientType(clientType string)    { c.ClientType = clientType }
+func (c *Client) SetAccountIds(accountIds string)    { c.accountIds = accountIds }
+func (c *Client) SetAuthDeadline(deadline time.Time) { c.AuthDeadline = deadline }
+func (c *Client) SetState(state int32)               { c.state.Store(state) }
+func (c *Client) GetState() int32                    { return c.state.Load() }
+func (c *Client) GetClientId() string                { return c.ClientId }
+func (c *Client) GetClientType() string              { return c.ClientType }
+func (c *Client) GetClientIp() string                { return c.ClientIp }
+
+// GetAccountIdsString 获取账户 ID 列表字符串
+func (c *Client) GetAccountIdsString() string {
+	return c.accountIds
+}
+
+// 状态检查辅助方法
+
+// IsPendingAuth 检查是否处于待认证状态
+func (c *Client) IsPendingAuth() bool {
+	return constant.ClientState(c.state.Load()) == constant.StatePendingAuth
+}
+
+// IsAuthenticated 检查是否已认证
+func (c *Client) IsAuthenticated() bool {
+	return constant.ClientState(c.state.Load()) == constant.StateAuthenticated
+}
+
+// IsAuthExpired 检查认证是否已过期
+func (c *Client) IsAuthExpired() bool {
+	state := constant.ClientState(c.state.Load())
+	if state == constant.StatePendingAuth {
+		return time.Now().After(c.AuthDeadline)
+	}
+	return state == constant.StateAuthExpired
+}
+
+// IsAuthValid 检查认证是否有效（已认证且未过期）
+func (c *Client) IsAuthValid() bool {
+	return constant.ClientState(c.state.Load()) == constant.StateAuthenticated
 }
 
 // NewClient 创建新的客户端实例
@@ -87,23 +130,18 @@ func NewClient(id string, conn *quickws.Conn, hub *Hub, cfg HubConfig, l logger.
 		wsPath:            wsPath,
 		logger:            l,
 	}
-	c.state.Store(int32(StateConnected))
+	c.state.Store(int32(constant.StateConnected))
 	return c
 }
 
 // IsLoggedIn 检查是否已登录
 func (c *Client) IsLoggedIn() bool {
-	return ClientState(c.state.Load()) == StateLoggedIn
-}
-
-// IsAuthValid 检查认证缓存是否有效（已认证且未过期）
-func (c *Client) IsAuthValid() bool {
-	return !c.AuthExpiry.IsZero() && time.Now().Before(c.AuthExpiry)
+	return constant.ClientState(c.state.Load()) == constant.StateLoggedIn
 }
 
 // IsClosed 检查连接是否已关闭
 func (c *Client) IsClosed() bool {
-	return ClientState(c.state.Load()) == StateClosed
+	return constant.ClientState(c.state.Load()) == constant.StateClosed
 }
 
 // SetLoginInfo 设置登录信息
@@ -113,8 +151,7 @@ func (c *Client) SetLoginInfo(userId, accountId string, accountIds []string, cli
 	c.AccountIds = accountIds
 	c.ClientId = clientId
 	c.SessionId = sessionId
-	c.IsBmsLogin = isBmsLogin
-	c.state.Store(int32(StateLoggedIn))
+	c.state.Store(int32(constant.StateLoggedIn))
 }
 
 // Send 发送消息到客户端（非阻塞）
@@ -209,7 +246,7 @@ func (c *Client) SendError(eventType string, code int, message string) bool {
 //   - 最后关闭 send：WritePump 已退出，安全关闭通道
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
-		c.state.Store(int32(StateClosed))
+		c.state.Store(int32(constant.StateClosed))
 		close(c.done)
 		if c.conn != nil {
 			_ = c.conn.Close()
