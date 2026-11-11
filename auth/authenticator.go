@@ -5,9 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/web3-coder-hub/cache"
 	"github.com/web3-coder-hub/logger"
-	"github.com/web3-coder-hub/websocket/constant"
 )
 
 // AuthStrategy 认证策略接口
@@ -50,7 +48,11 @@ type AuthClient interface {
 }
 
 // NewAuthenticator 创建认证器实例
-func NewAuthenticator(c cache.Cache, authType string, pendingAuthTimeoutSecs int, l logger.Logger) *Authenticator {
+// authType: 认证类型（token/sign/none）
+// strategy: 认证策略实例（应用层提供，如果为 nil 则表示无需认证）
+// pendingAuthTimeoutSecs: 认证超时时间（秒），0 表示使用默认值 10 秒
+// l: 日志记录器，可为 nil
+func NewAuthenticator(authType string, strategy AuthStrategy, pendingAuthTimeoutSecs int, l logger.Logger) *Authenticator {
 	if pendingAuthTimeoutSecs <= 0 {
 		pendingAuthTimeoutSecs = 10 // 默认 10 秒
 	}
@@ -62,18 +64,6 @@ func NewAuthenticator(c cache.Cache, authType string, pendingAuthTimeoutSecs int
 	var withLogger logger.Logger
 	if l != nil {
 		withLogger = l.With(logger.Field{Key: "component", Value: "authenticator"})
-	}
-
-	// 根据认证类型创建对应的策略
-	var strategy AuthStrategy
-	switch authType {
-	case constant.AuthTypeToken:
-		strategy = NewTokenAuthStrategy(c, l)
-	case constant.AuthTypeSign:
-		// TODO: 实现签名认证策略
-		strategy = nil
-	default:
-		strategy = nil // 无需认证
 	}
 
 	return &Authenticator{

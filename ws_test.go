@@ -32,7 +32,8 @@ func TestServerCreation(t *testing.T) {
 
 	serverAdapter := quickws.NewServerAdapter()
 
-	server := NewServer(cfg, hub, testCache, serverAdapter, logger.Default())
+	cfg.Cache = testCache
+	server := NewServer(cfg, hub, serverAdapter, logger.Default())
 
 	if server == nil {
 		t.Fatal("NewServer returned nil")
@@ -66,7 +67,8 @@ func TestRegisterHandler(t *testing.T) {
 	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
 	defer testCache.Close()
 
-	server := NewServer(cfg, hub, testCache, quickws.NewServerAdapter(), logger.Default())
+	cfg.Cache = testCache
+	server := NewServer(cfg, hub, quickws.NewServerAdapter(), logger.Default())
 
 	handlerCalled := false
 	testHandler := func(client *Client, msg *ClientMessage) error {
@@ -103,7 +105,8 @@ func TestDisconnectHandler(t *testing.T) {
 	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
 	defer testCache.Close()
 
-	server := NewServer(cfg, hub, testCache, quickws.NewServerAdapter(), logger.Default())
+	cfg.Cache = testCache
+	server := NewServer(cfg, hub, quickws.NewServerAdapter(), logger.Default())
 
 	disconnectCalled := false
 	var disconnectedClient *Client
@@ -141,7 +144,8 @@ func TestServerStartStop(t *testing.T) {
 	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
 	defer testCache.Close()
 
-	server := NewServer(cfg, hub, testCache, quickws.NewServerAdapter(), logger.Default())
+	cfg.Cache = testCache
+	server := NewServer(cfg, hub, quickws.NewServerAdapter(), logger.Default())
 
 	err := server.Start()
 	if err != nil {

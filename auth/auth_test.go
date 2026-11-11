@@ -1,8 +1,8 @@
 package auth
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,11 +16,14 @@ import (
 
 // TestNewAuthenticator tests authenticator creation
 func TestNewAuthenticator(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
-
 	t.Run("TokenAuth", func(t *testing.T) {
-		auth := NewAuthenticator(testCache, constant.AuthTypeToken, 10, logger.Default())
+		// 创建一个简单的解析函数用于测试
+		parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
+			return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
+		}
+		strategy := NewTokenAuthStrategy(nil, logger.Default(), parseFunc)
+
+		auth := NewAuthenticator(constant.AuthTypeToken, strategy, 10, logger.Default())
 		if auth == nil {
 			t.Fatal("NewAuthenticator returned nil")
 		}
@@ -33,7 +36,7 @@ func TestNewAuthenticator(t *testing.T) {
 	})
 
 	t.Run("NoAuth", func(t *testing.T) {
-		auth := NewAuthenticator(testCache, constant.AuthTypeNone, 10, logger.Default())
+		auth := NewAuthenticator(constant.AuthTypeNone, nil, 10, logger.Default())
 		if auth == nil {
 			t.Fatal("NewAuthenticator returned nil")
 		}
@@ -46,7 +49,7 @@ func TestNewAuthenticator(t *testing.T) {
 	})
 
 	t.Run("DefaultTimeout", func(t *testing.T) {
-		auth := NewAuthenticator(testCache, constant.AuthTypeNone, 0, logger.Default())
+		auth := NewAuthenticator(constant.AuthTypeNone, nil, 0, logger.Default())
 		if auth.pendingAuthTimeoutSecs != 10 {
 			t.Errorf("Expected default timeout 10, got %d", auth.pendingAuthTimeoutSecs)
 		}
@@ -55,10 +58,11 @@ func TestNewAuthenticator(t *testing.T) {
 
 // TestAuthenticatorGetters tests getter methods
 func TestAuthenticatorGetters(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
-
-	auth := NewAuthenticator(testCache, constant.AuthTypeToken, 15, logger.Default())
+	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
+		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
+	}
+	strategy := NewTokenAuthStrategy(nil, logger.Default(), parseFunc)
+	auth := NewAuthenticator(constant.AuthTypeToken, strategy, 15, logger.Default())
 
 	if auth.GetAuthType() != constant.AuthTypeToken {
 		t.Errorf("Expected auth type %s, got %s", constant.AuthTypeToken, auth.GetAuthType())
@@ -68,8 +72,7 @@ func TestAuthenticatorGetters(t *testing.T) {
 		t.Errorf("Expected timeout 15, got %d", auth.GetPendingAuthTimeout())
 	}
 
-	strategy := auth.GetStrategy()
-	if strategy == nil {
+	if auth.GetStrategy() == nil {
 		t.Error("Strategy should not be nil")
 	}
 }
@@ -203,22 +206,6 @@ func TestExtractHeaderOnly(t *testing.T) {
 	value = ExtractHeaderOnly(req, "Missing-Header", "default")
 	if value != "default" {
 		t.Errorf("Expected 'default', got %s", value)
-	}
-}
-
-// TestTokenAuthStrategy tests token authentication strategy
-func TestTokenAuthStrategy(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
-
-	strategy := NewTokenAuthStrategy(testCache, logger.Default())
-
-	if strategy == nil {
-		t.Fatal("NewTokenAuthStrategy returned nil")
-	}
-
-	if strategy.cache != testCache {
-		t.Error("Cache not set correctly")
 	}
 }
 
@@ -426,10 +413,11 @@ func TestExtractToken(t *testing.T) {
 
 // TestTokenAuthStrategyNilLogger tests TokenAuthStrategy with nil logger
 func TestTokenAuthStrategyNilLogger(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
+	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
+		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
+	}
 
-	strategy := NewTokenAuthStrategy(testCache, nil)
+	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
 
 	if strategy == nil {
 		t.Fatal("NewTokenAuthStrategy should handle nil logger")
@@ -491,85 +479,16 @@ func BenchmarkVerifyHmacSign(b *testing.B) {
 	}
 }
 
-// TestParseJWT tests JWT parsing
-func TestParseJWT(t *testing.T) {
-	t.Run("ValidJWT", func(t *testing.T) {
-		// Create a valid JWT (header.payload.signature format)
-		// For testing, we'll create a simple JWT with unverified signature
-		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-
-		content := loginUser{
-			DataCacheKey: "test-cache-key",
-			ClientType:   "APP",
-		}
-		contentJSON, _ := json.Marshal(content)
-
-		payload := jwtPayload{
-			Content: string(contentJSON),
-			Exp:     time.Now().Add(1 * time.Hour).Unix(),
-		}
-		payloadJSON, _ := json.Marshal(payload)
-		payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadJSON)
-
-		signature := base64.RawURLEncoding.EncodeToString([]byte("fake-signature"))
-
-		token := header + "." + payloadEncoded + "." + signature
-
-		lu, exp, err := parseJWT(token)
-		if err != nil {
-			t.Errorf("Failed to parse valid JWT: %v", err)
-		}
-		if lu.DataCacheKey != "test-cache-key" {
-			t.Errorf("Expected DataCacheKey 'test-cache-key', got %s", lu.DataCacheKey)
-		}
-		if lu.ClientType != "APP" {
-			t.Errorf("Expected ClientType 'APP', got %s", lu.ClientType)
-		}
-		if exp == 0 {
-			t.Error("Expected non-zero expiry")
-		}
-	})
-
-	t.Run("InvalidFormat", func(t *testing.T) {
-		_, _, err := parseJWT("invalid-token")
-		if err == nil {
-			t.Error("Should fail with invalid format")
-		}
-	})
-
-	t.Run("InvalidPayload", func(t *testing.T) {
-		token := "header.invalid-base64!@#.$%^.signature"
-		_, _, err := parseJWT(token)
-		if err == nil {
-			t.Error("Should fail with invalid payload")
-		}
-	})
-
-	t.Run("EmptyContent", func(t *testing.T) {
-		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256"}`))
-		payload := jwtPayload{
-			Content: "",
-			Exp:     0,
-		}
-		payloadJSON, _ := json.Marshal(payload)
-		payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadJSON)
-		signature := base64.RawURLEncoding.EncodeToString([]byte("sig"))
-
-		token := header + "." + payloadEncoded + "." + signature
-
-		_, _, err := parseJWT(token)
-		if err == nil {
-			t.Error("Should fail with empty content")
-		}
-	})
-}
-
 // TestTokenAuthStrategyAuthenticate tests Authenticate method
 func TestTokenAuthStrategyAuthenticate(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
+	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
+		if token == "invalid" {
+			return "", "", "", time.Time{}, errors.New("invalid token")
+		}
+		return "user123", "account456", "APP", time.Now().Add(time.Hour), nil
+	}
 
-	strategy := NewTokenAuthStrategy(testCache, nil)
+	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
 
 	t.Run("NoToken", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/ws", nil)
@@ -590,7 +509,7 @@ func TestTokenAuthStrategyAuthenticate(t *testing.T) {
 
 	t.Run("InvalidToken", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/ws", nil)
-		req.Header.Set("Access-Token", "invalid-token")
+		req.Header.Set("Access-Token", "invalid")
 
 		mockClient := &mockAuthClient{
 			clientId: "test-client",
@@ -609,10 +528,14 @@ func TestTokenAuthStrategyAuthenticate(t *testing.T) {
 
 // TestTokenAuthStrategyVerify tests Verify method
 func TestTokenAuthStrategyVerify(t *testing.T) {
-	testCache, _ := cache.NewBigCache(10, 5*time.Minute)
-	defer testCache.Close()
+	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {
+		if token == "invalid" {
+			return "", "", "", time.Time{}, errors.New("invalid token")
+		}
+		return "user123", "account456", "WEB", time.Now().Add(time.Hour), nil
+	}
 
-	strategy := NewTokenAuthStrategy(testCache, nil)
+	strategy := NewTokenAuthStrategy(nil, nil, parseFunc)
 
 	t.Run("EmptyCredential", func(t *testing.T) {
 		mockClient := &mockAuthClient{}
@@ -626,7 +549,7 @@ func TestTokenAuthStrategyVerify(t *testing.T) {
 	t.Run("InvalidToken", func(t *testing.T) {
 		mockClient := &mockAuthClient{}
 
-		err := strategy.Verify("invalid-token", mockClient)
+		err := strategy.Verify("invalid", mockClient)
 		if err == nil {
 			t.Error("Should error with invalid token")
 		}

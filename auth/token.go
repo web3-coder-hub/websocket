@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -21,36 +22,30 @@ const (
 	defaultClientType = "APP"
 )
 
-var (
-	errTokenInvalid = &AuthError{StatusCode: http.StatusUnauthorized, Code: "TOKEN_INVALID", Message: "Invalid or expired access token"}
-)
-
-// jwtPayload JWT 标准 Payload 结构
-type jwtPayload struct {
-	Content string `json:"content"` // 自定义业务数据（JSON 字符串）
-	Exp     int64  `json:"exp"`     // 过期时间（Unix 秒时间戳，0 表示无过期）
+// JWTPayload JWT 标准 Payload 结构（泛型版本）
+// T: content 字段的类型，可以是任意结构
+type JWTPayload[T any] struct {
+	Content T     `json:"content"` // 自定义业务数据
+	Exp     int64 `json:"exp"`     // 过期时间（Unix 秒时间戳，0 表示无过期）
 }
 
-// loginUser JWT content 字段中的用户信息
-type loginUser struct {
-	DataCacheKey string `json:"dataCacheKey"` // Redis 缓存键（用于查询完整用户数据）
-	ClientType   string `json:"clientType"`   // 客户端类型（APP/WEB/BMS 等）
-}
-
-// userData Redis 中存储的用户数据
-type userData struct {
-	UserId interface{} `json:"userId"` // 用户 ID（可能是 string 或 number）
-	ActId  interface{} `json:"actId"`  // 账户 ID（可能是 string 或 number）
-}
-
-// TokenAuthStrategy Token 认证策略
-type TokenAuthStrategy struct {
+// TokenAuthStrategy Token 认证策略（泛型版本）
+// JWTUserT: JWT content 中的登录用户信息类型
+// CacheUserT: 缓存中存储的用户数据类型
+type TokenAuthStrategy[JWTUserT, CacheUserT any] struct {
 	cache  cache.Cache
 	logger logger.Logger
+	// parseTokenFunc 解析 token 并返回认证信息的函数
+	// 返回: userId, accountId, clientType, expiry, error
+	parseTokenFunc func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error)
 }
 
+// CredentialParseFunc token 解析函数类型
+type CredentialParseFunc func(token string, cache cache.Cache, logger logger.Logger) (userId, accountId, clientType string, expiry time.Time, err error)
+
 // NewTokenAuthStrategy 创建 Token 认证策略实例
-func NewTokenAuthStrategy(c cache.Cache, l logger.Logger) *TokenAuthStrategy {
+// parseTokenFunc: 自定义的 token 解析函数，如果为 nil 则必须在使用前设置
+func NewTokenAuthStrategy(c cache.Cache, l logger.Logger, parseTokenFunc CredentialParseFunc) *TokenAuthStrategy[any, any] {
 	if l == nil {
 		l = logger.Default()
 	}
@@ -58,24 +53,29 @@ func NewTokenAuthStrategy(c cache.Cache, l logger.Logger) *TokenAuthStrategy {
 	if l != nil {
 		withLogger = l.With(logger.Field{Key: "component", Value: "token_auth"})
 	}
-	return &TokenAuthStrategy{
-		cache:  c,
-		logger: withLogger,
+	return &TokenAuthStrategy[any, any]{
+		cache:          c,
+		logger:         withLogger,
+		parseTokenFunc: parseTokenFunc,
 	}
 }
 
 // Authenticate 执行 Token 认证逻辑
-func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (authenticated bool, err error) {
+func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Authenticate(r *http.Request, client AuthClient) (authenticated bool, err error) {
 	token := extractToken(r)
 	if token == "" {
 		return false, nil // 无 token，返回未认证状态
+	}
+
+	if s.parseTokenFunc == nil {
+		return false, errors.New("token parse function not set")
 	}
 
 	clientId := client.GetClientId()
 	clientIp := client.GetClientIp()
 
 	// 解析 Token
-	userId, accountId, clientType, _, err := s.parseToken(token)
+	userId, accountId, clientType, _, err := s.parseTokenFunc(token, s.cache, s.logger)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("token validation failed",
@@ -83,7 +83,7 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 				logger.Field{Key: "remoteAddr", Value: clientIp},
 			)
 		}
-		return false, errTokenInvalid
+		return false, errors.New(constant.GetErrorMessage(constant.ErrCodeAuthFailed))
 	}
 
 	// 如果 token 中未提供 clientType，使用默认值
@@ -110,12 +110,16 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 }
 
 // Verify 校验 JWT Token 并更新客户端认证信息
-func (s *TokenAuthStrategy) Verify(credential string, client AuthClient) error {
+func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Verify(credential string, client AuthClient) error {
 	if credential == "" {
 		return fmt.Errorf("token is required")
 	}
 
-	userId, accountId, clientType, _, err := s.parseToken(credential)
+	if s.parseTokenFunc == nil {
+		return errors.New("token parse function not set")
+	}
+
+	userId, accountId, clientType, _, err := s.parseTokenFunc(credential, s.cache, s.logger)
 	if err != nil {
 		return err
 	}
@@ -140,78 +144,6 @@ func (s *TokenAuthStrategy) Verify(credential string, client AuthClient) error {
 	return nil
 }
 
-// parseToken 解析 JWT 并通过 Redis 查询用户数据
-func (s *TokenAuthStrategy) parseToken(token string) (userId, accountId, clientType string, expiry time.Time, err error) {
-	lu, exp, err := parseJWT(token)
-	if err != nil {
-		return "", "", "", time.Time{}, err
-	}
-
-	if exp > 0 {
-		expiry = time.Unix(exp, 0)
-	}
-
-	clientType = lu.ClientType
-
-	if s.cache == nil || lu.DataCacheKey == "" {
-		return "", "", clientType, expiry, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	cacheKey := userDataCacheName + "::" + lu.DataCacheKey
-	raw, exists, cacheErr := s.cache.Get(ctx, cacheKey)
-	if cacheErr != nil {
-		return "", "", "", time.Time{}, fmt.Errorf("cache lookup failed: %w", cacheErr)
-	}
-	if !exists {
-		return "", "", "", time.Time{}, fmt.Errorf("user data not found in cache, token may be expired")
-	}
-
-	var ud userData
-	if err := json.Unmarshal(raw, &ud); err != nil {
-		s.logger.Warn("failed to unmarshal UserData from cache",
-			logger.Field{Key: "cacheKey", Value: cacheKey},
-			logger.Field{Key: "error", Value: err.Error()},
-		)
-		return "", "", clientType, expiry, nil
-	}
-
-	userId = toString(ud.UserId)
-	accountId = toString(ud.ActId)
-	return userId, accountId, clientType, expiry, nil
-}
-
-// parseJWT 解码 JWT payload（不校验签名），返回 loginUser 和 exp 时间戳（秒，0 表示无过期）
-func parseJWT(token string) (*loginUser, int64, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to decode JWT payload: %w", err)
-	}
-
-	var claims jwtPayload
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT claims: %w", err)
-	}
-
-	if claims.Content == "" {
-		return nil, 0, fmt.Errorf("JWT content claim is empty")
-	}
-
-	var lu loginUser
-	if err := json.Unmarshal([]byte(claims.Content), &lu); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse JWT content: %w", err)
-	}
-
-	return &lu, claims.Exp, nil
-}
-
 // extractToken 从请求头中提取 Access-Token，支持 Bearer 前缀
 func extractToken(r *http.Request) string {
 	h := r.Header.Get(tokenHeader)
@@ -222,4 +154,81 @@ func extractToken(r *http.Request) string {
 		return h[len(bearerPrefix):]
 	}
 	return h
+}
+
+// ParseJWT 解码 JWT payload（不校验签名）- 泛型版本
+// T: JWT content 字段的类型
+// 返回: content 数据、exp 时间戳（秒，0 表示无过期）、错误
+func ParseJWT[T any](token string) (*T, int64, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+
+	var claims JWTPayload[T]
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse JWT claims: %w", err)
+	}
+
+	return &claims.Content, claims.Exp, nil
+}
+
+// ParseJWTWithStringContent 解码 JWT payload（content 为 JSON 字符串）- 泛型版本
+// T: 需要从 content 字符串解析的类型
+// 返回: 解析后的 content 数据、exp 时间戳（秒，0 表示无过期）、错误
+func ParseJWTWithStringContent[T any](token string) (*T, int64, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to decode JWT payload: %w", err)
+	}
+
+	var claims JWTPayload[string]
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse JWT claims: %w", err)
+	}
+
+	if claims.Content == "" {
+		return nil, 0, fmt.Errorf("JWT content claim is empty")
+	}
+
+	var content T
+	if err := json.Unmarshal([]byte(claims.Content), &content); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse JWT content: %w", err)
+	}
+
+	return &content, claims.Exp, nil
+}
+
+// ParseUserDataFromCache 从缓存中解析用户数据 - 泛型版本
+// T: 缓存中存储的用户数据类型
+func ParseUserDataFromCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error) {
+	if c == nil {
+		return nil, fmt.Errorf("cache is nil")
+	}
+
+	fullKey := userDataCacheName + "::" + cacheKey
+	raw, exists, err := c.Get(ctx, fullKey)
+	if err != nil {
+		return nil, fmt.Errorf("cache lookup failed: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("user data not found in cache")
+	}
+
+	var data T
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user data: %w", err)
+	}
+
+	return &data, nil
 }

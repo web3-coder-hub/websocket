@@ -26,14 +26,16 @@ type MessageHandler func(client *Client, msg *ClientMessage) error
 type DisconnectHandler func(client *Client)
 
 type Config struct {
-	Port                   int    `yaml:"port"`
-	Path                   string `yaml:"path"`
-	SessionTimeoutSeconds  int    `yaml:"session_timeout_seconds"`
-	HeartbeatIntervalSecs  int    `yaml:"heartbeat_interval_seconds"`
-	AuthType               string `yaml:"auth_type"`                    // 认证类型：空=不认证，token=Token认证，sign=签名认证
-	PendingAuthTimeoutSecs int    `yaml:"pending_auth_timeout_seconds"` // 待认证状态超时时间（秒），默认 10 秒
-	EnableSecurity         bool   `yaml:"enable_security"`
-	SecuritySecret         string `yaml:"security_secret"`
+	Port                   int                      `yaml:"port"`
+	Path                   string                   `yaml:"path"`
+	SessionTimeoutSeconds  int                      `yaml:"session_timeout_seconds"`
+	HeartbeatIntervalSecs  int                      `yaml:"heartbeat_interval_seconds"`
+	AuthType               string                   `yaml:"auth_type"`                    // 认证类型：空=不认证，token=Token认证，sign=签名认证
+	PendingAuthTimeoutSecs int                      `yaml:"pending_auth_timeout_seconds"` // 待认证状态超时时间（秒），默认 10 秒
+	EnableSecurity         bool                     `yaml:"enable_security"`
+	SecuritySecret         string                   `yaml:"security_secret"`
+	CredentialParseFunc    auth.CredentialParseFunc `yaml:"-"` // 凭证解析函数
+	Cache                  cache.Cache              `yaml:"-"` // 缓存实例（用于凭证缓存）
 }
 
 // Server WebSocket 服务器
@@ -50,11 +52,27 @@ type Server struct {
 }
 
 // NewServer 创建 WebSocket 服务器
-func NewServer(cfg Config, hub *Hub, cache cache.Cache, adapter adapter.ServerAdapter, l logger.Logger) *Server {
+func NewServer(cfg Config, hub *Hub, adapter adapter.ServerAdapter, l logger.Logger) *Server {
 	if l == nil {
 		l = logger.Default()
 	}
-	authenticator := auth.NewAuthenticator(cache, cfg.AuthType, cfg.PendingAuthTimeoutSecs, l)
+
+	// 根据配置创建认证器
+	var authenticator *auth.Authenticator
+	if cfg.AuthType == constant.AuthTypeToken {
+		// Token 认证需要提供解析函数
+		if cfg.CredentialParseFunc != nil {
+			strategy := auth.NewTokenAuthStrategy(cfg.Cache, l, cfg.CredentialParseFunc)
+			authenticator = auth.NewAuthenticator(cfg.AuthType, strategy, cfg.PendingAuthTimeoutSecs, l)
+		} else {
+			// 如果没有提供解析函数，创建一个无策略的认证器
+			authenticator = auth.NewAuthenticator(cfg.AuthType, nil, cfg.PendingAuthTimeoutSecs, l)
+		}
+	} else if cfg.AuthType != constant.AuthTypeNone && cfg.AuthType != "" {
+		// 其他认证类型（如签名认证），创建无策略的认证器
+		authenticator = auth.NewAuthenticator(cfg.AuthType, nil, cfg.PendingAuthTimeoutSecs, l)
+	}
+
 	return &Server{
 		config:   cfg,
 		hub:      hub,
