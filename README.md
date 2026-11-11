@@ -10,7 +10,8 @@ A high-performance, production-ready WebSocket library in Go with both server an
 
 #### Server Features
 - **High-Performance Architecture**: Sharded client management using FNV-1a hashing for minimal lock contention
-- **Flexible Authentication**: JWT-based authentication with Redis cache integration and optional anonymous connections
+- **Flexible Authentication**: Strategy-based authentication supporting token, signature, and custom methods with pluggable cache
+- **Delayed Authentication**: Browser-friendly authentication allowing LOGIN event after connection establishment
 - **Message Security**: HMAC-SHA256 signature verification for message integrity
 - **Multi-Tenancy Support**: Track clients by user ID, account ID, and session ID
 - **Heartbeat Management**: Automatic ping/pong with configurable intervals
@@ -26,11 +27,11 @@ A high-performance, production-ready WebSocket library in Go with both server an
 
 ### Advanced Features
 - **Pluggable Adapters**: Support multiple WebSocket libraries (QuickWS, Gorilla, etc.) through unified adapter interface
+- **Strategy-Based Authentication**: Pluggable authentication strategies (token, signature, custom) for extensibility
 - **Sharded Client Storage**: 32-shard concurrent map reduces lock contention in high-load scenarios
 - **Flexible Message Routing**: Send messages to specific users, accounts, sessions, or broadcast to all
-- **Authentication Caching**: Cache authentication info after JWT validation during handshake to avoid redundant Redis queries
-- **Auto-Login**: Automatic login flow triggered when authentication data is available during handshake
-- **BMS Support**: Backend management system login with operator tracking
+- **Authentication Caching**: Cache authentication info after credential validation to avoid redundant queries
+- **Delayed Authentication**: Support browsers and clients that cannot set custom headers during handshake
 - **Timeout Controls**: Configurable timeouts for message sending operations
 
 ## Architecture
@@ -79,11 +80,13 @@ HTTP server handling WebSocket upgrades with:
 
 #### Authenticator
 Connection-level authentication supporting:
-- JWT token parsing and validation
-- Redis-based user data lookup
+- Strategy pattern for pluggable authentication methods
+- Token authentication via JWT with cache for user data lookup
+- Signature authentication (planned)
 - Real IP extraction from proxy headers
 - Client fingerprinting for anonymous connections
-- Token expiry tracking and refresh prompting
+- Delayed authentication for browser clients
+- Configurable pending authentication timeout
 
 ### Client Components
 
@@ -145,13 +148,14 @@ func main() {
     
     // Configure server
     serverConfig := websocket.Config{
-        Port:                  8080,
-        Path:                  "/ws",
-        SessionTimeoutSeconds: 3600,
-        HeartbeatIntervalSecs: 30,
-        MustLogin:             false,
-        EnableSecurity:        true,
-        SecuritySecret:        "your-secret-key",
+        Port:                   8080,
+        Path:                   "/ws",
+        SessionTimeoutSeconds:  3600,
+        HeartbeatIntervalSecs:  30,
+        AuthType:               "token",  // Authentication type: "", "token", "sign"
+        PendingAuthTimeoutSecs: 10,       // Timeout for pending authentication
+        EnableSecurity:         true,
+        SecuritySecret:         "your-secret-key",
     }
     
     // Create server
@@ -374,24 +378,76 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed adapter implementation gui
 
 ## Authentication
 
-### Connection Authentication (Handshake)
+### Authentication Types
 
-The server supports multiple authentication modes:
+The server supports three authentication modes via the `AuthType` configuration:
 
-1. **JWT Token Authentication**: Token provided via `Access-Token` header or query parameter
-2. **Anonymous Connections**: Allowed when `MustLogin = false`
-3. **Auto-generated Client ID**: Based on User-Agent + IP when not provided
+1. **No Authentication (`AuthType: ""`)**
+   - Anonymous connections allowed
+   - Auto-generated session IDs for tracking
+   - Suitable for public WebSocket services
 
+2. **Token Authentication (`AuthType: "token"`)**
+   - JWT-based authentication with pluggable cache
+   - Supports both handshake and delayed authentication
+   - Token validation via HTTP header or LOGIN event
+   - Application layer decides cache implementation (Redis, Memory, etc.)
+
+3. **Signature Authentication (`AuthType: "sign"`)** _(Planned)_
+   - HMAC-based request signing
+   - Replay attack prevention
+   - Server-to-server authentication
+
+### Connection Authentication
+
+**Header-based Authentication:**
 ```bash
-# Connect with token
-ws://localhost:8080/ws?Access-Token=eyJhbGc...&Client-ID=client123
+# Connect with custom headers
+ws://localhost:8080/ws
 
-# Headers (preferred)
+Headers:
 Access-Token: Bearer eyJhbGc...
 Client-ID: client123
 Client-Type: APP
 Account-Ids: acc1,acc2,acc3
 ```
+
+### Delayed Authentication (Browser Support)
+
+Browsers' native WebSocket API cannot set custom headers. The library supports delayed authentication via LOGIN event:
+
+**Flow:**
+1. Client connects without credentials → Server sets `StatePendingAuth`
+2. Client sends LOGIN event with credentials within timeout period
+3. Server validates and updates client state to `StateAuthenticated`
+
+**JavaScript Example:**
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws');
+
+ws.onopen = () => {
+  // Send LOGIN event with credentials
+  ws.send(JSON.stringify({
+    eventType: 'login',
+    token: 'eyJhbGciOiJIUzI1NiIs...',
+    eventData: {}
+  }));
+};
+```
+
+**Configuration:**
+```go
+serverConfig := websocket.Config{
+    AuthType:               "token",
+    PendingAuthTimeoutSecs: 10,  // Clients must authenticate within 10 seconds
+}
+```
+
+### Token Expiry and Refresh
+
+- Credentials can be refreshed by sending a new LOGIN event
+- Expired authentication triggers `ErrCodeAuthFailed` for protected operations
+- Client state automatically updates upon successful re-authentication
 
 ### Message Authentication (HMAC Signature)
 
@@ -406,12 +462,6 @@ sign = HMAC-SHA256(
 ```
 
 The `eventData` is sorted by key before signing to ensure consistency.
-
-### Token Expiry Handling
-
-- JWT expiry time is cached in `Client.AuthExpiry` during handshake
-- Expired connections receive `ErrCodeAuthFailed` for non-login events
-- Clients must send new `login` event with fresh token to refresh authentication
 
 ## Message Routing
 
@@ -475,8 +525,10 @@ The hub uses a 32-shard concurrent map to reduce lock contention:
 
 ### Client States
 
-- **StateConnected**: Initial state after WebSocket upgrade
-- **StateLoggedIn**: After successful login event
+- **StateConnected**: WebSocket connection established (physical connection)
+- **StatePendingAuth**: Awaiting authentication (when AuthType requires auth but no credentials provided)
+- **StateAuthenticated**: Credentials validated successfully
+- **StateLoggedIn**: Application-level login completed
 - **StateClosed**: Connection closed, pending cleanup
 
 ### Cleanup Operations
@@ -551,13 +603,14 @@ type HubConfig struct {
 
 ```go
 type Config struct {
-    Port                  int    // Server port
-    Path                  string // WebSocket endpoint path
-    SessionTimeoutSeconds int    // Session timeout
-    HeartbeatIntervalSecs int    // Heartbeat interval
-    MustLogin             bool   // Require login before accepting messages
-    EnableSecurity        bool   // Enable HMAC signature verification
-    SecuritySecret        string // HMAC secret key
+    Port                   int    // Server port
+    Path                   string // WebSocket endpoint path
+    SessionTimeoutSeconds  int    // Session timeout
+    HeartbeatIntervalSecs  int    // Heartbeat interval
+    AuthType               string // Authentication type: "", "token", "sign"
+    PendingAuthTimeoutSecs int    // Timeout for pending authentication (seconds)
+    EnableSecurity         bool   // Enable HMAC signature verification
+    SecuritySecret         string // HMAC secret key
 }
 ```
 
@@ -602,11 +655,3 @@ type Config struct {
 ## License
 
 This project is part of the web3-coder-hub ecosystem.
-
-## Version History
-
-- `v1.0.5` - Latest stable release
-- `v1.0.4` - Enhanced authentication and security
-- `v1.0.3` - Sharded client management
-- `v1.0.2` - Initial multi-tenancy support
-- `v1.0.1` - First tagged release

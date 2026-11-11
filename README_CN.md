@@ -10,7 +10,8 @@
 
 #### 服务端特性
 - **高性能架构**：使用 FNV-1a 哈希的分片客户端管理，最小化锁竞争
-- **灵活的身份认证**：基于 JWT 的认证，集成 Redis 缓存，支持匿名连接
+- **灵活的身份认证**：基于策略模式的认证，支持 token、签名和自定义方法，使用可插拔的缓存
+- **延迟认证**：浏览器友好的认证方式，允许在连接建立后通过 LOGIN 事件认证
 - **消息安全**：HMAC-SHA256 签名验证确保消息完整性
 - **多租户支持**：按用户 ID、账户 ID 和会话 ID 跟踪客户端
 - **心跳管理**：自动 ping/pong 机制，可配置心跳间隔
@@ -26,11 +27,11 @@
 
 ### 高级特性
 - **可插拔适配器**：通过统一适配器接口支持多种 WebSocket 库（QuickWS、Gorilla 等）
+- **策略模式认证**：可插拔的认证策略（token、签名、自定义），提供良好的扩展性
 - **分片客户端存储**：32 分片并发映射减少高负载场景下的锁竞争
 - **灵活的消息路由**：向特定用户、账户、会话发送消息或广播给所有人
-- **身份认证缓存**：握手阶段 JWT 验证后缓存认证信息，避免重复 Redis 查询
-- **自动登录**：握手阶段获取到认证数据时自动触发登录流程
-- **BMS 支持**：后台管理系统登录，支持操作员追踪
+- **身份认证缓存**：凭证验证后缓存认证信息，避免重复查询
+- **延迟认证**：支持无法在握手时设置自定义头的浏览器和客户端
 - **超时控制**：消息发送操作可配置超时时间
 
 ## 架构设计
@@ -79,11 +80,13 @@
 
 #### Authenticator（身份认证器）
 连接级身份认证，支持：
-- JWT token 解析和验证
-- 基于 Redis 的用户数据查询
+- 策略模式实现可插拔的认证方法
+- 基于 JWT 的 Token 认证，通过缓存查询用户数据
+- 签名认证（计划中）
 - 从代理头提取真实 IP
 - 匿名连接的客户端指纹识别
-- Token 过期追踪和刷新提示
+- 浏览器客户端的延迟认证
+- 可配置的待认证超时时间
 
 ### 客户端组件
 
@@ -145,13 +148,14 @@ func main() {
     
     // 配置服务器
     serverConfig := websocket.Config{
-        Port:                  8080,
-        Path:                  "/ws",
-        SessionTimeoutSeconds: 3600,
-        HeartbeatIntervalSecs: 30,
-        MustLogin:             false,
-        EnableSecurity:        true,
-        SecuritySecret:        "your-secret-key",
+        Port:                   8080,
+        Path:                   "/ws",
+        SessionTimeoutSeconds:  3600,
+        HeartbeatIntervalSecs:  30,
+        AuthType:               "token",  // 认证类型：""、"token"、"sign"
+        PendingAuthTimeoutSecs: 10,       // 待认证超时时间
+        EnableSecurity:         true,
+        SecuritySecret:         "your-secret-key",
     }
     
     // 创建服务器
@@ -374,24 +378,76 @@ type ClientConn interface {
 
 ## 身份认证
 
-### 连接认证（握手阶段）
+### 认证类型
 
-服务器支持多种认证模式：
+服务器通过 `AuthType` 配置支持三种认证模式：
 
-1. **JWT Token 认证**：通过 `Access-Token` 请求头或查询参数提供 token
-2. **匿名连接**：当 `MustLogin = false` 时允许
-3. **自动生成客户端 ID**：未提供时基于 User-Agent + IP 的 MD5 自动生成
+1. **无需认证 (`AuthType: ""`)**
+   - 允许匿名连接
+   - 自动生成会话 ID 用于追踪
+   - 适用于公开的 WebSocket 服务
 
+2. **Token 认证 (`AuthType: "token"`)**
+   - 基于 JWT 的认证，使用可插拔的缓存
+   - 支持握手认证和延迟认证两种方式
+   - 通过 HTTP 头或 LOGIN 事件验证 token
+   - 应用层决定缓存实现（Redis、内存等）
+
+3. **签名认证 (`AuthType: "sign"`)** _（计划中）_
+   - 基于 HMAC 的请求签名
+   - 防重放攻击
+   - 服务端到服务端认证
+
+### 连接认证
+
+**基于请求头的认证：**
 ```bash
-# 使用 token 连接
-ws://localhost:8080/ws?Access-Token=eyJhbGc...&Client-ID=client123
+# 使用自定义请求头连接
+ws://localhost:8080/ws
 
-# 使用请求头（推荐）
+请求头：
 Access-Token: Bearer eyJhbGc...
 Client-ID: client123
 Client-Type: APP
 Account-Ids: acc1,acc2,acc3
 ```
+
+### 延迟认证（浏览器支持）
+
+浏览器原生 WebSocket API 无法设置自定义请求头。库支持通过 LOGIN 事件进行延迟认证：
+
+**流程：**
+1. 客户端无凭证连接 → 服务器设置 `StatePendingAuth` 状态
+2. 客户端在超时时间内发送 LOGIN 事件并携带凭证
+3. 服务器验证通过后更新客户端状态为 `StateAuthenticated`
+
+**JavaScript 示例：**
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws');
+
+ws.onopen = () => {
+  // 发送 LOGIN 事件并携带凭证
+  ws.send(JSON.stringify({
+    eventType: 'login',
+    token: 'eyJhbGciOiJIUzI1NiIs...',
+    eventData: {}
+  }));
+};
+```
+
+**配置：**
+```go
+serverConfig := websocket.Config{
+    AuthType:               "token",
+    PendingAuthTimeoutSecs: 10,  // 客户端必须在 10 秒内完成认证
+}
+```
+
+### Token 过期和刷新
+
+- 可以通过发送新的 LOGIN 事件刷新凭证
+- 认证过期后，受保护的操作会触发 `ErrCodeAuthFailed` 错误
+- 成功重新认证后，客户端状态自动更新
 
 ### 消息认证（HMAC 签名）
 
@@ -406,12 +462,6 @@ sign = HMAC-SHA256(
 ```
 
 `eventData` 会在签名前按 key 排序，以确保一致性。
-
-### Token 过期处理
-
-- JWT 过期时间在握手阶段缓存到 `Client.AuthExpiry`
-- 过期的连接在处理非 login 事件时会收到 `ErrCodeAuthFailed` 错误
-- 客户端必须发送新的 `login` 事件并携带新 token 来刷新认证
 
 ## 消息路由
 
@@ -475,8 +525,10 @@ Hub 使用 32 分片并发映射来减少锁竞争：
 
 ### 客户端状态
 
-- **StateConnected**：WebSocket 升级后的初始状态
-- **StateLoggedIn**：成功登录事件后的状态
+- **StateConnected**：WebSocket 连接已建立（物理连接）
+- **StatePendingAuth**：等待认证（当 AuthType 需要认证但未提供凭证时）
+- **StateAuthenticated**：凭证验证成功
+- **StateLoggedIn**：应用层登录完成
 - **StateClosed**：连接已关闭，等待清理
 
 ### 清理操作
@@ -551,13 +603,14 @@ type HubConfig struct {
 
 ```go
 type Config struct {
-    Port                  int    // 服务器端口
-    Path                  string // WebSocket 端点路径
-    SessionTimeoutSeconds int    // 会话超时时间
-    HeartbeatIntervalSecs int    // 心跳间隔
-    MustLogin             bool   // 接收消息前是否必须登录
-    EnableSecurity        bool   // 是否启用 HMAC 签名验证
-    SecuritySecret        string // HMAC 密钥
+    Port                   int    // 服务器端口
+    Path                   string // WebSocket 端点路径
+    SessionTimeoutSeconds  int    // 会话超时时间
+    HeartbeatIntervalSecs  int    // 心跳间隔
+    AuthType               string // 认证类型：""、"token"、"sign"
+    PendingAuthTimeoutSecs int    // 待认证超时时间（秒）
+    EnableSecurity         bool   // 是否启用 HMAC 签名验证
+    SecuritySecret         string // HMAC 密钥
 }
 ```
 
@@ -603,10 +656,3 @@ type Config struct {
 
 本项目是 web3-coder-hub 生态系统的一部分。
 
-## 版本历史
-
-- `v1.0.5` - 最新稳定版本
-- `v1.0.4` - 增强的认证和安全性
-- `v1.0.3` - 分片客户端管理
-- `v1.0.2` - 初始多租户支持
-- `v1.0.1` - 首个标记版本
