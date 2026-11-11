@@ -295,7 +295,7 @@ func TestClientSendMethods(t *testing.T) {
 
 		select {
 		case msg := <-client.send:
-			var resp Response
+			var resp ServerMessage
 			if err := json.Unmarshal(msg, &resp); err != nil {
 				t.Errorf("Failed to unmarshal: %v", err)
 			}
@@ -318,7 +318,7 @@ func TestClientSendMethods(t *testing.T) {
 
 		select {
 		case msg := <-client.send:
-			var resp Response
+			var resp ServerMessage
 			if err := json.Unmarshal(msg, &resp); err != nil {
 				t.Errorf("Failed to unmarshal: %v", err)
 			}
@@ -642,9 +642,10 @@ func BenchmarkHubBroadcast(b *testing.B) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	testMsg := &PushMessage{
-		Channel:   "test_channel",
+	testMsg := &ServerMessage{
 		Timestamp: time.Now(),
+		Success:   true,
+		EventType: "test_event",
 		Data:      map[string]string{"key": "value"},
 	}
 
@@ -663,7 +664,7 @@ func BenchmarkHubBroadcast(b *testing.B) {
 
 // BenchmarkJSONMarshal benchmarks JSON marshaling
 func BenchmarkJSONMarshal(b *testing.B) {
-	msg := &Response{
+	msg := &ServerMessage{
 		Timestamp: time.Now(),
 		Message:   "test message",
 		Success:   true,

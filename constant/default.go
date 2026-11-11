@@ -1,11 +1,6 @@
 package constant
 
 const (
-	// ChannelHeartbeat 心跳
-	ChannelHeartbeat = "heartbeat"
-)
-
-const (
 	// EventLogin 登录事件
 	EventLogin = "login"
 	// EventSubscribe 订阅事件

@@ -214,7 +214,7 @@ func (c *Client) SendJSON(v interface{}) bool {
 
 // SendSuccess 发送成功响应
 func (c *Client) SendSuccess(eventType, message string, data interface{}) bool {
-	return c.SendJSON(&Response{
+	return c.SendJSON(&ServerMessage{
 		Timestamp: time.Now(),
 		Message:   message,
 		Success:   true,
@@ -226,7 +226,7 @@ func (c *Client) SendSuccess(eventType, message string, data interface{}) bool {
 
 // SendError 发送错误响应
 func (c *Client) SendError(eventType string, code int, message string) bool {
-	return c.SendJSON(&Response{
+	return c.SendJSON(&ServerMessage{
 		Timestamp: time.Now(),
 		Message:   message,
 		Success:   false,
@@ -278,13 +278,14 @@ func (c *Client) HeartbeatPump() {
 		select {
 		case <-timer.C:
 			now := time.Now()
-			msg := &PushMessage{
-				Channel:   constant.ChannelHeartbeat,
+			msg := &ServerMessage{
 				Timestamp: now,
-				Data: HeartbeatData{
-					Type:      constant.EventPing,
-					Path:      c.wsPath,
-					Timestamp: now.UnixMilli(),
+				Success:   true,
+				EventType: constant.EventPing,
+				Data: map[string]interface{}{
+					"type":      constant.EventPing,
+					"path":      c.wsPath,
+					"timestamp": now.UnixMilli(),
 				},
 			}
 			c.SendJSON(msg)

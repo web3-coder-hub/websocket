@@ -645,17 +645,17 @@ type mockAuthClient struct {
 	state      int32
 }
 
-func (m *mockAuthClient) SetSessionId(id string)          { m.sessionId = id }
-func (m *mockAuthClient) SetUserId(id string)             { m.userId = id }
-func (m *mockAuthClient) SetAccountId(id string)          { m.accountId = id }
-func (m *mockAuthClient) SetClientId(id string)           { m.clientId = id }
-func (m *mockAuthClient) SetClientType(t string)          { m.clientType = t }
-func (m *mockAuthClient) SetClientIp(ip string)           { m.clientIp = ip }
-func (m *mockAuthClient) SetAccountIds(ids string)        { m.accountIds = ids }
-func (m *mockAuthClient) SetState(state int32)            { m.state = state }
-func (m *mockAuthClient) SetAuthDeadline(t time.Time)     {}
-func (m *mockAuthClient) GetState() int32                 { return m.state }
-func (m *mockAuthClient) GetClientId() string             { return m.clientId }
-func (m *mockAuthClient) GetClientType() string           { return m.clientType }
-func (m *mockAuthClient) GetClientIp() string             { return m.clientIp }
-func (m *mockAuthClient) GetAccountIdsString() string     { return m.accountIds }
+func (m *mockAuthClient) SetSessionId(id string)      { m.sessionId = id }
+func (m *mockAuthClient) SetUserId(id string)         { m.userId = id }
+func (m *mockAuthClient) SetAccountId(id string)      { m.accountId = id }
+func (m *mockAuthClient) SetClientId(id string)       { m.clientId = id }
+func (m *mockAuthClient) SetClientType(t string)      { m.clientType = t }
+func (m *mockAuthClient) SetClientIp(ip string)       { m.clientIp = ip }
+func (m *mockAuthClient) SetAccountIds(ids string)    { m.accountIds = ids }
+func (m *mockAuthClient) SetState(state int32)        { m.state = state }
+func (m *mockAuthClient) SetAuthDeadline(t time.Time) {}
+func (m *mockAuthClient) GetState() int32             { return m.state }
+func (m *mockAuthClient) GetClientId() string         { return m.clientId }
+func (m *mockAuthClient) GetClientType() string       { return m.clientType }
+func (m *mockAuthClient) GetClientIp() string         { return m.clientIp }
+func (m *mockAuthClient) GetAccountIdsString() string { return m.accountIds }
