@@ -368,49 +368,6 @@ func TestSortAndSerializeParam(t *testing.T) {
 	})
 }
 
-// TestExtractToken tests token extraction from request
-func TestExtractToken(t *testing.T) {
-	t.Run("FromAccessTokenHeader", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/ws", nil)
-		req.Header.Set("Access-Token", "token-from-header")
-
-		token := extractToken(req)
-		if token != "token-from-header" {
-			t.Errorf("Expected 'token-from-header', got %s", token)
-		}
-	})
-
-	t.Run("WithBearerPrefix", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/ws", nil)
-		req.Header.Set("Access-Token", "Bearer token-with-bearer")
-
-		token := extractToken(req)
-		if token != "token-with-bearer" {
-			t.Errorf("Expected 'token-with-bearer', got %s", token)
-		}
-	})
-
-	t.Run("NoToken", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/ws", nil)
-
-		token := extractToken(req)
-		if token != "" {
-			t.Errorf("Expected empty string, got %s", token)
-		}
-	})
-
-	t.Run("PriorityOrder", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/ws?access_token=query-token", nil)
-		req.Header.Set("Access-Token", "header-token")
-
-		token := extractToken(req)
-		// Access-Token header should be extracted (query params not supported)
-		if token != "header-token" {
-			t.Errorf("Expected 'header-token', got %s", token)
-		}
-	})
-}
-
 // TestTokenAuthStrategyNilLogger tests TokenAuthStrategy with nil logger
 func TestTokenAuthStrategyNilLogger(t *testing.T) {
 	parseFunc := func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error) {

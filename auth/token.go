@@ -15,13 +15,6 @@ import (
 	"github.com/web3-coder-hub/websocket/constant"
 )
 
-const (
-	tokenHeader       = "Access-Token"
-	bearerPrefix      = "Bearer "
-	userDataCacheName = "LOGIN_USER"
-	defaultClientType = "APP"
-)
-
 // JWTPayload JWT 标准 Payload 结构（泛型版本）
 // T: content 字段的类型，可以是任意结构
 type JWTPayload[T any] struct {
@@ -29,40 +22,76 @@ type JWTPayload[T any] struct {
 	Exp     int64 `json:"exp"`     // 过期时间（Unix 秒时间戳，0 表示无过期）
 }
 
-// TokenAuthStrategy Token 认证策略（泛型版本）
-// JWTUserT: JWT content 中的登录用户信息类型
-// CacheUserT: 缓存中存储的用户数据类型
-type TokenAuthStrategy[JWTUserT, CacheUserT any] struct {
-	cache  cache.Cache
-	logger logger.Logger
-	// parseTokenFunc 解析 token 并返回认证信息的函数
-	// 返回: userId, accountId, clientType, expiry, error
-	parseTokenFunc func(token string, cache cache.Cache, logger logger.Logger) (string, string, string, time.Time, error)
+// TokenAuthConfig Token 认证策略配置
+type TokenAuthConfig struct {
+	Cache             cache.Cache         // 缓存实例
+	Logger            logger.Logger       // 日志记录器
+	ParseFunc         CredentialParseFunc // Token 解析函数
+	TokenHeader       string              // Token 请求头名称，默认 "Access-Token"
+	BearerPrefix      string              // Bearer 前缀，默认 "Bearer "
+	DefaultClientType string              // 默认客户端类型，默认 "APP"
+}
+
+// TokenAuthStrategy Token 认证策略
+type TokenAuthStrategy struct {
+	cache             cache.Cache
+	logger            logger.Logger
+	parseTokenFunc    CredentialParseFunc
+	tokenHeader       string
+	bearerPrefix      string
+	defaultClientType string
 }
 
 // CredentialParseFunc token 解析函数类型
 type CredentialParseFunc func(token string, cache cache.Cache, logger logger.Logger) (userId, accountId, clientType string, expiry time.Time, err error)
 
-// NewTokenAuthStrategy 创建 Token 认证策略实例
-// parseTokenFunc: 自定义的 token 解析函数，如果为 nil 则必须在使用前设置
-func NewTokenAuthStrategy(c cache.Cache, l logger.Logger, parseTokenFunc CredentialParseFunc) *TokenAuthStrategy[any, any] {
-	if l == nil {
-		l = logger.Default()
+// NewTokenAuthStrategy 创建 Token 认证策略实例（使用默认配置）
+func NewTokenAuthStrategy(c cache.Cache, l logger.Logger, parseFunc CredentialParseFunc) *TokenAuthStrategy {
+	return NewTokenAuthStrategyWithConfig(TokenAuthConfig{
+		Cache:             c,
+		Logger:            l,
+		ParseFunc:         parseFunc,
+		TokenHeader:       "Access-Token",
+		BearerPrefix:      "Bearer ",
+		DefaultClientType: "APP",
+	})
+}
+
+// NewTokenAuthStrategyWithConfig 使用自定义配置创建 Token 认证策略实例
+func NewTokenAuthStrategyWithConfig(cfg TokenAuthConfig) *TokenAuthStrategy {
+	if cfg.Logger == nil {
+		cfg.Logger = logger.Default()
 	}
+
 	var withLogger logger.Logger
-	if l != nil {
-		withLogger = l.With(logger.Field{Key: "component", Value: "token_auth"})
+	if cfg.Logger != nil {
+		withLogger = cfg.Logger.With(logger.Field{Key: "component", Value: "token_auth"})
 	}
-	return &TokenAuthStrategy[any, any]{
-		cache:          c,
-		logger:         withLogger,
-		parseTokenFunc: parseTokenFunc,
+
+	// 设置默认值
+	if cfg.TokenHeader == "" {
+		cfg.TokenHeader = "Access-Token"
+	}
+	if cfg.BearerPrefix == "" {
+		cfg.BearerPrefix = "Bearer "
+	}
+	if cfg.DefaultClientType == "" {
+		cfg.DefaultClientType = "APP"
+	}
+
+	return &TokenAuthStrategy{
+		cache:             cfg.Cache,
+		logger:            withLogger,
+		parseTokenFunc:    cfg.ParseFunc,
+		tokenHeader:       cfg.TokenHeader,
+		bearerPrefix:      cfg.BearerPrefix,
+		defaultClientType: cfg.DefaultClientType,
 	}
 }
 
 // Authenticate 执行 Token 认证逻辑
-func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Authenticate(r *http.Request, client AuthClient) (authenticated bool, err error) {
-	token := extractToken(r)
+func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (authenticated bool, err error) {
+	token := s.extractToken(r)
 	if token == "" {
 		return false, nil // 无 token，返回未认证状态
 	}
@@ -88,7 +117,7 @@ func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Authenticate(r *http.Request, 
 
 	// 如果 token 中未提供 clientType，使用默认值
 	if clientType == "" {
-		clientType = defaultClientType
+		clientType = s.defaultClientType
 	}
 
 	// 设置认证信息
@@ -110,7 +139,7 @@ func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Authenticate(r *http.Request, 
 }
 
 // Verify 校验 JWT Token 并更新客户端认证信息
-func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Verify(credential string, client AuthClient) error {
+func (s *TokenAuthStrategy) Verify(credential string, client AuthClient) error {
 	if credential == "" {
 		return fmt.Errorf("token is required")
 	}
@@ -144,14 +173,14 @@ func (s *TokenAuthStrategy[JWTUserT, CacheUserT]) Verify(credential string, clie
 	return nil
 }
 
-// extractToken 从请求头中提取 Access-Token，支持 Bearer 前缀
-func extractToken(r *http.Request) string {
-	h := r.Header.Get(tokenHeader)
+// extractToken 从请求头中提取 Token，支持 Bearer 前缀
+func (s *TokenAuthStrategy) extractToken(r *http.Request) string {
+	h := r.Header.Get(s.tokenHeader)
 	if h == "" {
 		return ""
 	}
-	if strings.HasPrefix(h, bearerPrefix) {
-		return h[len(bearerPrefix):]
+	if strings.HasPrefix(h, s.bearerPrefix) {
+		return h[len(s.bearerPrefix):]
 	}
 	return h
 }
@@ -211,13 +240,13 @@ func ParseJWTWithStringContent[T any](token string) (*T, int64, error) {
 
 // ParseUserDataFromCache 从缓存中解析用户数据 - 泛型版本
 // T: 缓存中存储的用户数据类型
+// cacheKey: 完整的缓存键，由应用层决定格式
 func ParseUserDataFromCache[T any](ctx context.Context, c cache.Cache, cacheKey string) (*T, error) {
 	if c == nil {
 		return nil, fmt.Errorf("cache is nil")
 	}
 
-	fullKey := userDataCacheName + "::" + cacheKey
-	raw, exists, err := c.Get(ctx, fullKey)
+	raw, exists, err := c.Get(ctx, cacheKey)
 	if err != nil {
 		return nil, fmt.Errorf("cache lookup failed: %w", err)
 	}
