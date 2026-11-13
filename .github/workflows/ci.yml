@@ -27,7 +27,7 @@ jobs:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
           GIT_REPO: ${{ secrets.GIT_REPO }}
         run: |
-          git config --global url."https://${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://${GIT_REPO}:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
           echo "GOPRIVATE=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
           echo "GONOPROXY=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
           echo "GONOSUMDB=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
