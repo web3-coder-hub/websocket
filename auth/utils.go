@@ -11,27 +11,27 @@ import (
 	"github.com/web3-coder-hub/websocket/constant"
 )
 
-// GenerateClientId 通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成客户端标识
-func GenerateClientId(r *http.Request) string {
+// GenerateClientID 通过 SHA256(User-Agent + "|" + RemoteIP)[:32] 自动生成客户端标识
+func GenerateClientID(r *http.Request) string {
 	fingerprint := r.UserAgent() + "|" + ExtractRealIP(r)
 	hash := sha256.Sum256([]byte(fingerprint))
 	return fmt.Sprintf("%x", hash)[:32]
 }
 
-// GenerateSessionId 生成随机会话标识（用于未配置认证器时的匿名会话）
-func GenerateSessionId() string {
+// GenerateSessionID 生成随机会话标识（用于未配置认证器时的匿名会话）
+func GenerateSessionID() string {
 	timestamp := time.Now().UnixNano()
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%d", timestamp)))
-	sessionId := fmt.Sprintf("%d-%x", timestamp, hash[:4])
-	if len(sessionId) > 32 {
-		return sessionId[:32]
+	sessionID := fmt.Sprintf("%d-%x", timestamp, hash[:4])
+	if len(sessionID) > 32 {
+		return sessionID[:32]
 	}
-	return sessionId
+	return sessionID
 }
 
-// GenerateSessionIdFromClientId 根据 clientId 生成会话标识
-func GenerateSessionIdFromClientId(clientId string) string {
-	hash := sha256.Sum256([]byte(constant.DefaultClientType + "-" + clientId))
+// GenerateSessionIDFromClientID 根据 clientID 生成会话标识
+func GenerateSessionIDFromClientID(clientID string) string {
+	hash := sha256.Sum256([]byte(constant.DefaultClientType + "-" + clientID))
 	return fmt.Sprintf("%x", hash)[:32]
 }
 

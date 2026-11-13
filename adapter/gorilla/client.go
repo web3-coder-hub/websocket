@@ -1,3 +1,4 @@
+// Package gorilla provides WebSocket adapter implementation using gorilla/websocket library.
 package gorilla
 
 import (
@@ -72,11 +73,11 @@ func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callbac
 
 // ClientConn gorilla 客户端连接实现
 type ClientConn struct {
-	conn      *websocket.Conn
 	callback  adapter.ClientCallback
-	connected atomic.Int32
+	conn      *websocket.Conn
 	done      chan struct{}
 	closeOnce sync.Once
+	connected atomic.Int32
 }
 
 func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
@@ -84,7 +85,9 @@ func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
 }
 
 func (c *ClientConn) WriteTimeout(op adapter.Opcode, data []byte, timeout time.Duration) error {
-	_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	if err := c.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
 	return c.conn.WriteMessage(int(op), data)
 }
 

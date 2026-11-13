@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,53 +15,30 @@ import (
 
 // Client 表示一个 WebSocket 客户端连接
 type Client struct {
-	// 连接标识
-	ID        string // 连接唯一ID
-	SessionId string // 会话ID（用于消息推送定位）
-
-	// 用户信息（登录后设置）
-	UserId     string   // 用户ID
-	AccountId  string   // 当前账户ID
-	AccountIds []string // 所有账户ID列表
-	ClientId   string   // 客户端ID
-	ClientType string   // 客户端类型（APP/WEB/BMS 等）
-	ClientIp   string   // 客户端真实 IP
-	RemoteAddr string   // 客户端远程地址（IP:Port）
-
-	// WebSocket 连接
-	conn adapter.ServerConn
-
-	// Hub 引用
-	hub *Hub
-
-	// 消息发送通道
-	send chan []byte
-
-	// 关闭信号：用于 select 中安全退出
-	done chan struct{}
-
-	// 状态
-	state     atomic.Int32
-	closeOnce sync.Once
-
-	// 配置
-	writeWait time.Duration
-
-	// 日志
-	logger logger.Logger
-
-	// 心跳
-	heartbeatInterval time.Duration
-	heartbeatReset    chan struct{}
-	wsPath            string
-
-	// 认证信息
-	AuthDeadline time.Time // 认证截止时间（用于待认证状态的超时控制）
-	accountIds   string    // 多账户 ID 列表（逗号分隔）
-
-	// 连接时间
-	ConnectedAt time.Time
-	lastPingAt  atomic.Int64 // Unix 纳秒时间戳
+	ConnectedAt       time.Time          // 连接时间
+	AuthDeadline      time.Time          // 认证截止时间（用于待认证状态的超时控制）
+	conn              adapter.ServerConn // WebSocket 连接
+	logger            logger.Logger      // 日志
+	heartbeatReset    chan struct{}      // 心跳重置信号
+	hub               *Hub               // Hub 引用
+	done              chan struct{}      // 关闭信号：用于 select 中安全退出
+	send              chan []byte        // 消息发送通道
+	RemoteAddr        string             // 客户端远程地址（IP:Port）
+	ClientID          string             // 客户端ID
+	ID                string             // 连接唯一ID
+	ClientIP          string             // 客户端真实 IP
+	ClientType        string             // 客户端类型（APP/WEB/BMS 等）
+	SessionID         string             // 会话ID（用于消息推送定位）
+	accountIds        string             // 多账户 ID 列表（逗号分隔）
+	UserID            string             // 用户ID
+	wsPath            string             // WebSocket 路径
+	AccountID         string             // 当前账户ID
+	AccountIds        []string           // 所有账户ID列表
+	lastPingAt        atomic.Int64       // Unix 纳秒时间戳
+	heartbeatInterval time.Duration      // 心跳间隔
+	writeWait         time.Duration      // 写入超时时间
+	closeOnce         sync.Once          // 确保只关闭一次
+	state             atomic.Int32       // 客户端状态
 }
 
 // 确保 Client 实现了 auth.AuthClient 接口
@@ -68,19 +46,19 @@ var _ auth.AuthClient = (*Client)(nil)
 
 // 实现 auth.AuthClient 接口
 
-func (c *Client) SetSessionId(sessionId string)      { c.SessionId = sessionId }
-func (c *Client) SetUserId(userId string)            { c.UserId = userId }
-func (c *Client) SetAccountId(accountId string)      { c.AccountId = accountId }
-func (c *Client) SetClientId(clientId string)        { c.ClientId = clientId }
-func (c *Client) SetClientIp(clientIp string)        { c.ClientIp = clientIp }
+func (c *Client) SetSessionID(sessionID string)      { c.SessionID = sessionID }
+func (c *Client) SetUserID(userID string)            { c.UserID = userID }
+func (c *Client) SetAccountID(accountID string)      { c.AccountID = accountID }
+func (c *Client) SetClientID(clientID string)        { c.ClientID = clientID }
+func (c *Client) SetClientIP(clientIP string)        { c.ClientIP = clientIP }
 func (c *Client) SetClientType(clientType string)    { c.ClientType = clientType }
 func (c *Client) SetAccountIds(accountIds string)    { c.accountIds = accountIds }
 func (c *Client) SetAuthDeadline(deadline time.Time) { c.AuthDeadline = deadline }
 func (c *Client) SetState(state int32)               { c.state.Store(state) }
 func (c *Client) GetState() int32                    { return c.state.Load() }
-func (c *Client) GetClientId() string                { return c.ClientId }
+func (c *Client) GetClientID() string                { return c.ClientID }
 func (c *Client) GetClientType() string              { return c.ClientType }
-func (c *Client) GetClientIp() string                { return c.ClientIp }
+func (c *Client) GetClientIP() string                { return c.ClientIP }
 
 // GetAccountIdsString 获取账户 ID 列表字符串
 func (c *Client) GetAccountIdsString() string {
@@ -143,12 +121,12 @@ func (c *Client) IsClosed() bool {
 }
 
 // SetLoginInfo 设置登录信息
-func (c *Client) SetLoginInfo(userId, accountId string, accountIds []string, clientId, sessionId string, isBmsLogin bool) {
-	c.UserId = userId
-	c.AccountId = accountId
+func (c *Client) SetLoginInfo(userID, accountID string, accountIds []string, clientID, sessionID string, isBmsLogin bool) {
+	c.UserID = userID
+	c.AccountID = accountID
 	c.AccountIds = accountIds
-	c.ClientId = clientId
-	c.SessionId = sessionId
+	c.ClientID = clientID
+	c.SessionID = sessionID
 	c.state.Store(int32(constant.StateLoggedIn))
 }
 
@@ -247,7 +225,9 @@ func (c *Client) Close() {
 		c.state.Store(int32(constant.StateClosed))
 		close(c.done)
 		if c.conn != nil {
-			_ = c.conn.Close()
+			if err := c.conn.Close(); err != nil {
+				fmt.Printf("client conn close error: %v\n", err)
+			}
 		}
 		close(c.send)
 		if c.hub != nil {

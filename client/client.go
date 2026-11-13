@@ -1,3 +1,4 @@
+// Package client provides WebSocket client implementation with reconnection and message handling.
 package client
 
 import (
@@ -19,19 +20,17 @@ import (
 
 // Config 客户端配置
 type Config struct {
-	URL                  string            `json:"url"`
 	Headers              map[string]string `json:"headers"`
-	ReconnectEnabled     bool              `json:"reconnect_enabled"`
+	URL                  string            `json:"url"`
+	RequestIDField       string            `json:"request_id_field"`
+	ResponseIDField      string            `json:"response_id_field"`
 	ReconnectInterval    time.Duration     `json:"reconnect_interval"`
 	MaxReconnectAttempts int               `json:"max_reconnect_attempts"`
 	HeartbeatInterval    time.Duration     `json:"heartbeat_interval"`
 	HeartbeatTimeout     time.Duration     `json:"heartbeat_timeout"`
 	WriteTimeout         time.Duration     `json:"write_timeout"`
 	HandshakeTimeout     time.Duration     `json:"handshake_timeout"`
-
-	// 同步请求配置
-	RequestIDField  string `json:"request_id_field"`  // 请求ID字段名，默认 "requestId"
-	ResponseIDField string `json:"response_id_field"` // 响应ID字段名，默认 "requestId"
+	ReconnectEnabled     bool              `json:"reconnect_enabled"`
 }
 
 // MessageHandler 消息处理器 - 接收解析后的消息数据（map格式）
@@ -45,42 +44,28 @@ type handlerEntry struct {
 
 // Client WebSocket 客户端
 type Client struct {
-	config  Config
-	adapter adapter.ClientAdapter
-	conn    adapter.ClientConn
-	logger  logger.Logger
-
-	// 状态
-	connected atomic.Bool
-	closed    atomic.Bool
-
-	// ID
-	id        string
-	sessionID string
-
-	// 消息处理
-	handlers   map[string]*handlerEntry // 事件处理器映射
-	handlersMu sync.RWMutex
-
-	// 事件处理
-	onConnect    func()
-	onDisconnect func()
-	onError      func(error)
-
-	// 重连
-	reconnecting     atomic.Bool
+	logger           logger.Logger
+	adapter          adapter.ClientAdapter
+	conn             adapter.ClientConn
+	onDisconnect     func()
+	onConnect        func()
+	requestManager   *RequestManager
+	done             chan struct{}
+	handlers         map[string]*handlerEntry
+	onError          func(error)
+	sessionID        string
+	id               string
+	config           Config
 	reconnectAttempt int
-
-	// 控制
-	done      chan struct{}
-	closeOnce sync.Once
-
-	// 同步请求支持
-	requestManager *RequestManager
+	handlersMu       sync.RWMutex
+	closeOnce        sync.Once
+	connected        atomic.Bool
+	reconnecting     atomic.Bool
+	closed           atomic.Bool
 }
 
 // NewClient 创建客户端
-func NewClient(cfg Config, adapter adapter.ClientAdapter, l logger.Logger) *Client {
+func NewClient(cfg Config, clientAdapter adapter.ClientAdapter, l logger.Logger) *Client {
 	if cfg.ReconnectInterval == 0 {
 		cfg.ReconnectInterval = 5 * time.Second
 	}
@@ -99,7 +84,7 @@ func NewClient(cfg Config, adapter adapter.ClientAdapter, l logger.Logger) *Clie
 
 	return &Client{
 		config:         cfg,
-		adapter:        adapter,
+		adapter:        clientAdapter,
 		logger:         l,
 		id:             uuid.New().String(),
 		handlers:       make(map[string]*handlerEntry),
@@ -255,7 +240,7 @@ func (c *Client) Request(ctx context.Context, data map[string]any) (map[string]a
 // eventType: 事件类型值（如 "trade", "kline"）
 // eventTypeField: 事件类型字段名（如 "e", "event", "type"）
 // handler: 事件处理函数
-func (c *Client) RegisterHandler(eventType string, eventTypeField string, handler MessageHandler) {
+func (c *Client) RegisterHandler(eventType, eventTypeField string, handler MessageHandler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 
@@ -313,7 +298,9 @@ func (c *Client) reconnect() {
 
 	c.connected.Store(false)
 	if c.conn != nil {
-		_ = c.conn.Close()
+		if err := c.conn.Close(); err != nil {
+			fmt.Printf("client conn close error before reconnect: %v\n", err)
+		}
 	}
 
 	for c.reconnectAttempt < c.config.MaxReconnectAttempts {
