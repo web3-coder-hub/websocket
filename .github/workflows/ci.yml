@@ -27,7 +27,7 @@ jobs:
           GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
           GIT_REPO: ${{ secrets.GIT_REPO }}
         run: |
-          git config --global url."https://${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://${GIT_REPO}:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
           echo "GOPRIVATE=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
           echo "GONOPROXY=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
           echo "GONOSUMDB=github.com/${GIT_REPO}/*" >> $GITHUB_ENV
@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pr-build-${{ github.event.pull_request.number }}
-          path: bin/venues-connector
+          path: bin/ws
           retention-days: 7
 
       - name: Quality gate summary

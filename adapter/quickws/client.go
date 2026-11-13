@@ -1,9 +1,11 @@
+// Package quickws provides WebSocket adapter implementation using antlabs/quickws library.
 package quickws
 
 import (
 	"bytes"
 	"compress/flate"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -54,17 +56,18 @@ func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callbac
 	}
 
 	// 构建 quickws 选项
-	var dialOptions []quickws.ClientOption
-	dialOptions = append(dialOptions, quickws.WithClientCallback(wrapper))
-
-	// 启用自动回复ping帧 - 这对于维持长连接至关重要
-	dialOptions = append(dialOptions, quickws.WithClientReplyPing())
+	dialOptions := []quickws.ClientOption{
+		quickws.WithClientCallback(wrapper),
+		quickws.WithClientReplyPing(), // 启用自动回复ping帧 - 这对于维持长连接至关重要
+	}
 
 	// 如果启用压缩，需要同时设置压缩和解压缩
 	// quickws 要求两者都设置才会协商 permessage-deflate
 	if opts.Compression {
-		dialOptions = append(dialOptions, quickws.WithClientCompression())
-		dialOptions = append(dialOptions, quickws.WithClientDecompression())
+		dialOptions = append(dialOptions,
+			quickws.WithClientCompression(),
+			quickws.WithClientDecompression(),
+		)
 	}
 
 	conn, err := quickws.Dial(url, dialOptions...)
@@ -84,21 +87,21 @@ func (a *ClientAdapter) DialWithOptions(url string, headers http.Header, callbac
 
 // ClientConn quickws 客户端连接实现
 type ClientConn struct {
-	conn               *quickws.Conn
-	url                string
-	headers            http.Header
 	callback           adapter.ClientCallback
-	connected          atomic.Int32
+	conn               *quickws.Conn
+	headers            http.Header
 	readChan           chan message
 	done               chan struct{}
+	url                string
 	closeOnce          sync.Once
-	compressionEnabled bool // 是否启用了压缩
+	connected          atomic.Int32
+	compressionEnabled bool
 }
 
 type message struct {
-	op   adapter.Opcode
-	data []byte
 	err  error
+	data []byte
+	op   adapter.Opcode
 }
 
 func (c *ClientConn) Write(op adapter.Opcode, data []byte) error {
@@ -216,10 +219,8 @@ func decompressData(data []byte) ([]byte, error) {
 		data[dataLen-2] != 0xff || data[dataLen-1] != 0xff
 
 	var reader io.ReadCloser
-	var err error
 
 	if needsTail {
-		// 使用临时缓冲区避免修改原始数据
 		// 预分配容量以避免扩容
 		tailBuf := make([]byte, dataLen+4)
 		copy(tailBuf, data)
@@ -232,11 +233,10 @@ func decompressData(data []byte) ([]byte, error) {
 		reader = flate.NewReader(bytes.NewReader(data))
 	}
 
-	if err != nil {
-		return nil, err
-	}
 	defer func() {
-		_ = reader.Close() // #nosec G110 - WebSocket message size is bounded by protocol
+		if err := reader.Close(); err != nil {
+			fmt.Printf("flate reader close error: %v\n", err)
+		}
 	}()
 
 	// 预估解压后大小通常是压缩数据的 2-10 倍

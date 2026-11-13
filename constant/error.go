@@ -16,7 +16,7 @@ const (
 	ErrCodeConnWriteTimeout = 5008 // 连接写入超时
 )
 
-// 错误消息映射
+// ErrorMessages maps error codes to their corresponding error messages.
 var ErrorMessages = map[int]string{
 	ErrCodeParamInvalid:     "Parameter validation failed",
 	ErrCodeNotLogin:         "Not logged in",

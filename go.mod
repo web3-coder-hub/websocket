@@ -1,6 +1,6 @@
 module github.com/web3-coder-hub/websocket
 
-go 1.26.1
+go 1.27.1
 
 require (
 	github.com/antlabs/quickws v0.2.2

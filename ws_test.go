@@ -207,7 +207,7 @@ func TestHubOperations(t *testing.T) {
 	// Create test client
 	client := &Client{
 		ID:        "test-id",
-		SessionId: "test-session",
+		SessionID: "test-session",
 		send:      make(chan []byte, 10),
 		done:      make(chan struct{}),
 	}
@@ -346,31 +346,31 @@ func TestClientAuthMethods(t *testing.T) {
 
 	client := &Client{
 		ID:        "test-id",
-		SessionId: "test-session",
+		SessionID: "test-session",
 		send:      make(chan []byte, 10),
 		done:      make(chan struct{}),
 	}
 	client.state.Store(int32(constant.StateConnected))
 
 	t.Run("SetAndGetMethods", func(t *testing.T) {
-		client.SetSessionId("session-123")
-		if client.SessionId != "session-123" {
-			t.Errorf("Expected session-123, got %s", client.SessionId)
+		client.SetSessionID("session-123")
+		if client.SessionID != "session-123" {
+			t.Errorf("Expected session-123, got %s", client.SessionID)
 		}
 
-		client.SetUserId("user-456")
-		if client.UserId != "user-456" {
-			t.Errorf("Expected user-456, got %s", client.UserId)
+		client.SetUserID("user-456")
+		if client.UserID != "user-456" {
+			t.Errorf("Expected user-456, got %s", client.UserID)
 		}
 
-		client.SetAccountId("account-789")
-		if client.AccountId != "account-789" {
-			t.Errorf("Expected account-789, got %s", client.AccountId)
+		client.SetAccountID("account-789")
+		if client.AccountID != "account-789" {
+			t.Errorf("Expected account-789, got %s", client.AccountID)
 		}
 
-		client.SetClientId("client-abc")
-		if client.GetClientId() != "client-abc" {
-			t.Errorf("Expected client-abc, got %s", client.GetClientId())
+		client.SetClientID("client-abc")
+		if client.GetClientID() != "client-abc" {
+			t.Errorf("Expected client-abc, got %s", client.GetClientID())
 		}
 
 		client.SetClientType("APP")
@@ -378,9 +378,9 @@ func TestClientAuthMethods(t *testing.T) {
 			t.Errorf("Expected APP, got %s", client.GetClientType())
 		}
 
-		client.SetClientIp("192.168.1.100")
-		if client.GetClientIp() != "192.168.1.100" {
-			t.Errorf("Expected 192.168.1.100, got %s", client.GetClientIp())
+		client.SetClientIP("192.168.1.100")
+		if client.GetClientIP() != "192.168.1.100" {
+			t.Errorf("Expected 192.168.1.100, got %s", client.GetClientIP())
 		}
 
 		client.SetAccountIds("acc1,acc2,acc3")
@@ -435,17 +435,17 @@ func TestClientAuthMethods(t *testing.T) {
 	t.Run("SetLoginInfo", func(t *testing.T) {
 		client.SetLoginInfo("user-999", "account-888", []string{"acc1", "acc2"}, "client-777", "session-666", false)
 
-		if client.UserId != "user-999" {
-			t.Errorf("Expected user-999, got %s", client.UserId)
+		if client.UserID != "user-999" {
+			t.Errorf("Expected user-999, got %s", client.UserID)
 		}
-		if client.AccountId != "account-888" {
-			t.Errorf("Expected account-888, got %s", client.AccountId)
+		if client.AccountID != "account-888" {
+			t.Errorf("Expected account-888, got %s", client.AccountID)
 		}
-		if client.ClientId != "client-777" {
-			t.Errorf("Expected client-777, got %s", client.ClientId)
+		if client.ClientID != "client-777" {
+			t.Errorf("Expected client-777, got %s", client.ClientID)
 		}
-		if client.SessionId != "session-666" {
-			t.Errorf("Expected session-666, got %s", client.SessionId)
+		if client.SessionID != "session-666" {
+			t.Errorf("Expected session-666, got %s", client.SessionID)
 		}
 		if !client.IsLoggedIn() {
 			t.Error("Client should be in logged in state")
