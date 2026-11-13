@@ -65,8 +65,8 @@ Central connection manager that maintains:
 #### Server Connection (Server-side Client)
 Represents individual WebSocket connections on the server:
 - Unique connection ID and session ID
-- User identity (userId, accountId, accountIds)
-- Client metadata (clientType, clientId, remoteAddr)
+- User identity (userID, accountID, accountIds)
+- Client metadata (clientType, clientID, remoteAddr)
 - Message send channel with configurable buffer size
 - State management (Connected, LoggedIn, Closed)
 - Authentication cache to avoid redundant token validation
@@ -494,7 +494,7 @@ import (
 
 // Implement CredentialParseFunc with your custom logic
 func parseMyToken(token string, c cache.Cache, l logger.Logger) (
-    userId, accountId, clientType string, 
+    userID, accountID, clientType string, 
     expiry time.Time, 
     err error,
 ) {
