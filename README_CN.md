@@ -65,8 +65,8 @@
 #### Server Connection（服务端客户端）
 表示服务端的单个 WebSocket 连接：
 - 唯一的连接 ID 和会话 ID
-- 用户身份信息（userId、accountId、accountIds）
-- 客户端元数据（clientType、clientId、remoteAddr）
+- 用户身份信息（userID、accountID、accountIds）
+- 客户端元数据（clientType、clientID、remoteAddr）
 - 可配置缓冲区大小的消息发送通道
 - 状态管理（已连接、已登录、已关闭）
 - 认证缓存，避免冗余的 token 验证
@@ -494,7 +494,7 @@ import (
 
 // 实现 CredentialParseFunc 自定义逻辑
 func parseMyToken(token string, c cache.Cache, l logger.Logger) (
-    userId, accountId, clientType string, 
+    userID, accountID, clientType string, 
     expiry time.Time, 
     err error,
 ) {
