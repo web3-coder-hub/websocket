@@ -1,6 +1,7 @@
 package gorilla
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -54,7 +55,9 @@ type ServerConn struct {
 }
 
 func (c *ServerConn) WriteTimeout(op adapter.Opcode, data []byte, timeout time.Duration) error {
-	_ = c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	if err := c.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
 	return c.conn.WriteMessage(int(op), data)
 }
 
@@ -67,7 +70,10 @@ func (c *ServerConn) StartReadLoop() {
 		if c.callback != nil {
 			c.callback.OnClose(c, nil)
 		}
-		_ = c.conn.Close()
+		// Best effort close in defer cleanup
+		if err := c.conn.Close(); err != nil {
+			fmt.Printf("gorilla server conn close error: %v\n", err)
+		}
 	}()
 
 	for {

@@ -26,33 +26,33 @@ type MessageHandler func(client *Client, msg *ClientMessage) error
 type DisconnectHandler func(client *Client)
 
 type Config struct {
-	Port                   int                      `yaml:"port"`
+	Cache                  cache.Cache              `yaml:"-"` // 缓存实例（用于凭证缓存）
+	CredentialParseFunc    auth.CredentialParseFunc `yaml:"-"` // 凭证解析函数
 	Path                   string                   `yaml:"path"`
+	AuthType               string                   `yaml:"auth_type"` // 认证类型：空=不认证，token=Token认证，sign=签名认证
+	SecuritySecret         string                   `yaml:"security_secret"`
+	Port                   int                      `yaml:"port"`
 	SessionTimeoutSeconds  int                      `yaml:"session_timeout_seconds"`
 	HeartbeatIntervalSecs  int                      `yaml:"heartbeat_interval_seconds"`
-	AuthType               string                   `yaml:"auth_type"`                    // 认证类型：空=不认证，token=Token认证，sign=签名认证
 	PendingAuthTimeoutSecs int                      `yaml:"pending_auth_timeout_seconds"` // 待认证状态超时时间（秒），默认 10 秒
 	EnableSecurity         bool                     `yaml:"enable_security"`
-	SecuritySecret         string                   `yaml:"security_secret"`
-	CredentialParseFunc    auth.CredentialParseFunc `yaml:"-"` // 凭证解析函数
-	Cache                  cache.Cache              `yaml:"-"` // 缓存实例（用于凭证缓存）
 }
 
 // Server WebSocket 服务器
 type Server struct {
-	config       Config
-	hub          *Hub
 	logger       logger.Logger
+	adapter      adapter.ServerAdapter
+	hub          *Hub
 	handlers     map[string]MessageHandler
-	mu           sync.RWMutex
 	onDisconnect DisconnectHandler
 	httpServer   *http.Server
 	auth         *auth.Authenticator
-	adapter      adapter.ServerAdapter
+	config       Config
+	mu           sync.RWMutex
 }
 
 // NewServer 创建 WebSocket 服务器
-func NewServer(cfg Config, hub *Hub, adapter adapter.ServerAdapter, l logger.Logger) *Server {
+func NewServer(cfg Config, hub *Hub, serverAdapter adapter.ServerAdapter, l logger.Logger) *Server {
 	if l == nil {
 		l = logger.Default()
 	}
@@ -83,7 +83,7 @@ func NewServer(cfg Config, hub *Hub, adapter adapter.ServerAdapter, l logger.Log
 		logger:   l,
 		handlers: make(map[string]MessageHandler),
 		auth:     authenticator,
-		adapter:  adapter,
+		adapter:  serverAdapter,
 	}
 }
 
@@ -196,9 +196,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("websocket client connected",
 		logger.Field{Key: "connId", Value: connID},
-		logger.Field{Key: "clientId", Value: client.ClientId},
-		logger.Field{Key: "sessionId", Value: client.SessionId},
-		logger.Field{Key: "clientIp", Value: client.ClientIp},
+		logger.Field{Key: "clientId", Value: client.ClientID},
+		logger.Field{Key: "sessionId", Value: client.SessionID},
+		logger.Field{Key: "clientIp", Value: client.ClientIP},
 	)
 
 	conn.StartReadLoop()
@@ -207,8 +207,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // wsCallback 适配器回调实现
 type wsCallback struct {
 	server *Server
-	connID string
 	client *Client
+	connID string
 }
 
 func (c *wsCallback) OnOpen(_ adapter.ServerConn) {}
@@ -301,7 +301,7 @@ func (c *wsCallback) OnClose(_ adapter.ServerConn, _ error) {
 
 	c.server.logger.Info("websocket client disconnected",
 		logger.Field{Key: "connId", Value: c.connID},
-		logger.Field{Key: "userId", Value: c.client.UserId},
+		logger.Field{Key: "userId", Value: c.client.UserID},
 	)
 }
 
@@ -309,19 +309,19 @@ func (c *wsCallback) OnClose(_ adapter.ServerConn, _ error) {
 func (s *Server) authenticateClient(r *http.Request, client *Client) error {
 	// 未配置认证器：生成匿名会话标识
 	if s.auth == nil {
-		client.SetSessionId(auth.GenerateSessionId())
+		client.SetSessionID(auth.GenerateSessionID())
 		return nil
 	}
 
-	clientId := auth.GenerateClientId(r)
-	clientIp := auth.ExtractRealIP(r)
+	clientID := auth.GenerateClientID(r)
+	clientIP := auth.ExtractRealIP(r)
 
 	// 获取认证策略
 	strategy := s.auth.GetStrategy()
 
 	// 设置基本信息
-	client.SetClientId(clientId)
-	client.SetClientIp(clientIp)
+	client.SetClientID(clientID)
+	client.SetClientIP(clientIP)
 
 	// 判断是否需要认证
 	requiresAuth := s.auth.GetAuthType() == constant.AuthTypeToken || s.auth.GetAuthType() == constant.AuthTypeSign
@@ -329,7 +329,7 @@ func (s *Server) authenticateClient(r *http.Request, client *Client) error {
 	// 无需认证：允许匿名连接
 	if !requiresAuth {
 		client.SetClientType(constant.DefaultClientType)
-		client.SetSessionId(auth.GenerateSessionIdFromClientId(clientId))
+		client.SetSessionID(auth.GenerateSessionIDFromClientID(clientID))
 		client.SetState(int32(constant.StateConnected))
 		return nil
 	}
@@ -347,7 +347,7 @@ func (s *Server) authenticateClient(r *http.Request, client *Client) error {
 
 	// 策略未认证：设置为待认证状态，允许后续通过 LOGIN 事件认证
 	client.SetClientType(constant.DefaultClientType)
-	client.SetSessionId(auth.GenerateSessionIdFromClientId(clientId))
+	client.SetSessionID(auth.GenerateSessionIDFromClientID(clientID))
 	client.SetAuthDeadline(time.Now().Add(time.Duration(s.auth.GetPendingAuthTimeout()) * time.Second))
 	client.SetState(int32(constant.StatePendingAuth))
 	return nil
@@ -378,7 +378,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 
 		if err := strategy.Verify(msg.Token, client); err != nil {
 			s.logger.Warn("pending auth credential verification failed",
-				logger.Field{Key: "sessionId", Value: client.SessionId},
+				logger.Field{Key: "sessionId", Value: client.SessionID},
 				logger.Field{Key: "error", Value: err.Error()},
 			)
 			client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, "Credential verification failed")
@@ -386,8 +386,8 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 		}
 
 		s.logger.Info("pending auth completed",
-			logger.Field{Key: "sessionId", Value: client.SessionId},
-			logger.Field{Key: "userId", Value: client.UserId},
+			logger.Field{Key: "sessionId", Value: client.SessionID},
+			logger.Field{Key: "userId", Value: client.UserID},
 			logger.Field{Key: "clientType", Value: client.ClientType},
 		)
 		return nil
@@ -410,7 +410,7 @@ func (s *Server) validateCredential(client *Client, msg *ClientMessage) error {
 
 	if err := strategy.Verify(msg.Token, client); err != nil {
 		s.logger.Warn("login credential verification failed",
-			logger.Field{Key: "sessionId", Value: client.SessionId},
+			logger.Field{Key: "sessionId", Value: client.SessionID},
 			logger.Field{Key: "error", Value: err.Error()},
 		)
 		client.SendError(constant.EventLogin, constant.ErrCodeAuthFailed, "credential verification failed")
@@ -427,7 +427,7 @@ func (s *Server) verifyMessageSign(client *Client, msg *ClientMessage) bool {
 		eventDataStr = string(msg.EventData)
 	}
 	return auth.VerifyHmacSign(
-		client.ClientType, client.ClientId,
+		client.ClientType, client.ClientID,
 		msg.Nonce, eventDataStr,
 		s.config.SecuritySecret, msg.Sign,
 	)

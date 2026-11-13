@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pr-build-${{ github.event.pull_request.number }}
-          path: bin/venues-connector
+          path: bin/ws
           retention-days: 7
 
       - name: Quality gate summary

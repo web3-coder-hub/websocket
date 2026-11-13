@@ -14,11 +14,11 @@ import (
 
 // Mock callback for testing
 type mockServerCallback struct {
+	messages        [][]byte
+	mu              sync.Mutex
 	onOpenCalled    bool
 	onMessageCalled bool
 	onCloseCalled   bool
-	messages        [][]byte
-	mu              sync.Mutex
 }
 
 func (m *mockServerCallback) OnOpen(conn adapter.ServerConn) {
@@ -50,13 +50,13 @@ func (m *mockServerCallback) reset() {
 }
 
 type mockClientCallback struct {
+	messages        [][]byte
+	errors          []error
+	mu              sync.Mutex
 	onOpenCalled    bool
 	onMessageCalled bool
 	onCloseCalled   bool
 	onErrorCalled   bool
-	messages        [][]byte
-	errors          []error
-	mu              sync.Mutex
 }
 
 func (m *mockClientCallback) OnOpen(conn adapter.ClientConn) {

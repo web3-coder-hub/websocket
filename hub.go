@@ -14,10 +14,48 @@ const (
 	shardMask  = shardCount - 1 // 0x1F，用于位运算取模
 )
 
+// HubConfig defines the configuration for WebSocket Hub.
+type HubConfig struct {
+	WriteWait      time.Duration `yaml:"write_wait"`
+	PongWait       time.Duration `yaml:"pong_wait"`
+	PingPeriod     time.Duration `yaml:"ping_period"`
+	MaxMessageSize int64         `yaml:"max_message_size"`
+	SendBufferSize int           `yaml:"send_buffer_size"`
+}
+
+// Hub 管理所有客户端连接
+type Hub struct {
+	logger         logger.Logger   // 日志
+	clients        *ShardedClients // 所有客户端连接，key 是连接ID
+	sessions       *ShardedClients // sessionId 到 client 的映射，用于快速查找
+	userClients    *ShardedClients // userId 到 clients 的映射（一个用户可能有多个连接）
+	accountClients *ShardedClients // accountId 到 clients 的映射
+	register       chan *Client    // 注册通道
+	unregister     chan *Client    // 注销通道
+	done           chan struct{}   // 关闭信号
+	config         HubConfig       // 配置
+	doneOnce       sync.Once       // 确保只关闭一次
+}
+
+// NewHub 创建新的 Hub 实例
+func NewHub(cfg HubConfig, l logger.Logger) *Hub {
+	return &Hub{
+		clients:        NewShardedClients(),
+		sessions:       NewShardedClients(),
+		userClients:    NewShardedClients(),
+		accountClients: NewShardedClients(),
+		register:       make(chan *Client, 100),
+		unregister:     make(chan *Client, 100),
+		config:         cfg,
+		logger:         l,
+		done:           make(chan struct{}),
+	}
+}
+
 // ClientShard 客户端分片
 type ClientShard struct {
-	mu      sync.RWMutex
 	clients map[string]*Client
+	mu      sync.RWMutex
 }
 
 // ShardedClients 分片客户端映射
@@ -136,61 +174,6 @@ func (sc *ShardedClients) RangeByPrefix(prefix string, fn func(key string, clien
 	}
 }
 
-// Hub WebSocket Hub配置
-type HubConfig struct {
-	WriteWait      time.Duration `yaml:"write_wait"`
-	PongWait       time.Duration `yaml:"pong_wait"`
-	PingPeriod     time.Duration `yaml:"ping_period"`
-	MaxMessageSize int64         `yaml:"max_message_size"`
-	SendBufferSize int           `yaml:"send_buffer_size"`
-}
-
-// Hub 管理所有客户端连接
-type Hub struct {
-	// 所有客户端连接，key 是连接ID
-	clients *ShardedClients
-
-	// sessionId 到 client 的映射，用于快速查找
-	sessions *ShardedClients
-
-	// userId 到 clients 的映射（一个用户可能有多个连接）
-	userClients *ShardedClients
-
-	// accountId 到 clients 的映射
-	accountClients *ShardedClients
-
-	// 注册通道
-	register chan *Client
-
-	// 注销通道
-	unregister chan *Client
-
-	// 配置
-	config HubConfig
-
-	// 日志
-	logger logger.Logger
-
-	// 关闭信号
-	done     chan struct{}
-	doneOnce sync.Once
-}
-
-// NewHub 创建新的 Hub 实例
-func NewHub(cfg HubConfig, l logger.Logger) *Hub {
-	return &Hub{
-		clients:        NewShardedClients(),
-		sessions:       NewShardedClients(),
-		userClients:    NewShardedClients(),
-		accountClients: NewShardedClients(),
-		register:       make(chan *Client, 100),
-		unregister:     make(chan *Client, 100),
-		config:         cfg,
-		logger:         l,
-		done:           make(chan struct{}),
-	}
-}
-
 // Run 运行 Hub（在独立的 goroutine 中）
 func (h *Hub) Run() {
 	if h.logger != nil {
@@ -236,8 +219,8 @@ func (h *Hub) Unregister(client *Client) {
 func (h *Hub) addClient(client *Client) {
 	h.clients.Store(client.ID, client)
 
-	if client.SessionId != "" {
-		h.sessions.Store(client.SessionId, client)
+	if client.SessionID != "" {
+		h.sessions.Store(client.SessionID, client)
 	}
 
 	if h.logger != nil {
@@ -254,81 +237,81 @@ func (h *Hub) removeClient(client *Client) {
 	}
 
 	// 从session映射移除
-	if client.SessionId != "" {
-		h.sessions.Delete(client.SessionId)
+	if client.SessionID != "" {
+		h.sessions.Delete(client.SessionID)
 	}
 
 	// 从userId映射移除
-	if client.UserId != "" {
-		h.removeFromUserClients(client.UserId, client)
+	if client.UserID != "" {
+		h.removeFromUserClients(client.UserID, client)
 	}
 
 	// 从accountId映射移除
-	if client.AccountId != "" {
-		h.removeFromAccountClients(client.AccountId, client)
+	if client.AccountID != "" {
+		h.removeFromAccountClients(client.AccountID, client)
 	}
 
 	// 从所有accountIds映射移除
-	for _, accountId := range client.AccountIds {
-		h.removeFromAccountClients(accountId, client)
+	for _, accountID := range client.AccountIds {
+		h.removeFromAccountClients(accountID, client)
 	}
 
 	if h.logger != nil {
 		h.logger.Info("client unregistered",
 			logger.Field{Key: "clientId", Value: client.ID},
-			logger.Field{Key: "userId", Value: client.UserId},
+			logger.Field{Key: "userID", Value: client.UserID},
 		)
 	}
 }
 
 // RegisterLogin 注册登录信息
-func (h *Hub) RegisterLogin(client *Client, userId, accountId string, accountIds []string, clientId, sessionId string, isBmsLogin bool) {
-	client.SetLoginInfo(userId, accountId, accountIds, clientId, sessionId, isBmsLogin)
+func (h *Hub) RegisterLogin(client *Client, userID, accountID string, accountIds []string, clientID, sessionID string, isBmsLogin bool) {
+	client.SetLoginInfo(userID, accountID, accountIds, clientID, sessionID, isBmsLogin)
 
 	// 添加到session映射
-	h.sessions.Store(sessionId, client)
+	h.sessions.Store(sessionID, client)
 
 	// 添加到userId映射
-	h.addToUserClients(userId, client)
+	h.addToUserClients(userID, client)
 
 	// 添加到accountId映射
-	if accountId != "" {
-		h.addToAccountClients(accountId, client)
+	if accountID != "" {
+		h.addToAccountClients(accountID, client)
 	}
 
 	// 添加到所有accountIds映射
-	for _, accId := range accountIds {
-		h.addToAccountClients(accId, client)
+	for _, accID := range accountIds {
+		h.addToAccountClients(accID, client)
 	}
 
 	if h.logger != nil {
 		h.logger.Info("client logged in",
 			logger.Field{Key: "clientId", Value: client.ID},
-			logger.Field{Key: "userId", Value: userId},
-			logger.Field{Key: "accountId", Value: accountId},
-			logger.Field{Key: "sessionId", Value: sessionId},
+			logger.Field{Key: "userID", Value: userID},
+			logger.Field{Key: "accountID", Value: accountID},
+			logger.Field{Key: "sessionID", Value: sessionID},
 		)
 	}
 }
 
 // addToUserClients 添加客户端到用户映射
-func (h *Hub) addToUserClients(userId string, client *Client) {
-	h.userClients.Store(userId+":"+client.ID, client)
+func (h *Hub) addToUserClients(userID string, client *Client) {
+	h.userClients.Store(userID+":"+client.ID, client)
 }
 
 // removeFromUserClients 从用户映射中移除客户端
-func (h *Hub) removeFromUserClients(userId string, client *Client) {
-	h.userClients.Delete(userId + ":" + client.ID)
+func (h *Hub) removeFromUserClients(userID string, client *Client) {
+	h.userClients.Delete(userID + ":" + client.ID)
 }
 
 // addToAccountClients 添加客户端到账户映射
-func (h *Hub) addToAccountClients(accountId string, client *Client) {
-	h.accountClients.Store(accountId+":"+client.ID, client)
+func (h *Hub) addToAccountClients(accountID string, client *Client) {
+	h.accountClients.Store(accountID+":"+client.ID, client)
 }
 
 // removeFromAccountClients 从账户映射中移除客户端
-func (h *Hub) removeFromAccountClients(accountId string, client *Client) {
-	h.accountClients.Delete(accountId + ":" + client.ID)
+func (h *Hub) removeFromAccountClients(accountID string, client *Client) {
+	h.accountClients.Delete(accountID + ":" + client.ID)
 }
 
 // GetClient 根据连接ID获取客户端
@@ -337,14 +320,14 @@ func (h *Hub) GetClient(id string) (*Client, bool) {
 }
 
 // GetClientBySession 根据SessionId获取客户端
-func (h *Hub) GetClientBySession(sessionId string) (*Client, bool) {
-	return h.sessions.Load(sessionId)
+func (h *Hub) GetClientBySession(sessionID string) (*Client, bool) {
+	return h.sessions.Load(sessionID)
 }
 
-// GetClientsByUserId 根据UserId获取所有客户端
-func (h *Hub) GetClientsByUserId(userId string) []*Client {
+// GetClientsByUserID 根据UserId获取所有客户端
+func (h *Hub) GetClientsByUserID(userID string) []*Client {
 	var clients []*Client
-	prefix := userId + ":"
+	prefix := userID + ":"
 	h.userClients.RangeByPrefix(prefix, func(_ string, client *Client) bool {
 		if !client.IsClosed() {
 			clients = append(clients, client)
@@ -354,10 +337,10 @@ func (h *Hub) GetClientsByUserId(userId string) []*Client {
 	return clients
 }
 
-// GetClientsByAccountId 根据AccountId获取所有客户端
-func (h *Hub) GetClientsByAccountId(accountId string) []*Client {
+// GetClientsByAccountID 根据AccountId获取所有客户端
+func (h *Hub) GetClientsByAccountID(accountID string) []*Client {
 	var clients []*Client
-	prefix := accountId + ":"
+	prefix := accountID + ":"
 	h.accountClients.RangeByPrefix(prefix, func(_ string, client *Client) bool {
 		if !client.IsClosed() {
 			clients = append(clients, client)
@@ -388,9 +371,9 @@ func (h *Hub) BroadcastToLoggedIn(data []byte) {
 }
 
 // SendToUser 发送消息给指定用户的所有连接
-func (h *Hub) SendToUser(userId string, data []byte) int {
+func (h *Hub) SendToUser(userID string, data []byte) int {
 	count := 0
-	for _, client := range h.GetClientsByUserId(userId) {
+	for _, client := range h.GetClientsByUserID(userID) {
 		if client.Send(data) {
 			count++
 		}
@@ -399,9 +382,9 @@ func (h *Hub) SendToUser(userId string, data []byte) int {
 }
 
 // SendToUserWithTimeout 发送消息给指定用户，带超时
-func (h *Hub) SendToUserWithTimeout(userId string, data []byte, timeout time.Duration) int {
+func (h *Hub) SendToUserWithTimeout(userID string, data []byte, timeout time.Duration) int {
 	count := 0
-	for _, client := range h.GetClientsByUserId(userId) {
+	for _, client := range h.GetClientsByUserID(userID) {
 		if client.SendWithTimeout(data, timeout) {
 			count++
 		}
@@ -410,9 +393,9 @@ func (h *Hub) SendToUserWithTimeout(userId string, data []byte, timeout time.Dur
 }
 
 // SendToAccount 发送消息给指定账户的所有连接
-func (h *Hub) SendToAccount(accountId string, data []byte) int {
+func (h *Hub) SendToAccount(accountID string, data []byte) int {
 	count := 0
-	for _, client := range h.GetClientsByAccountId(accountId) {
+	for _, client := range h.GetClientsByAccountID(accountID) {
 		if client.Send(data) {
 			count++
 		}
@@ -421,24 +404,24 @@ func (h *Hub) SendToAccount(accountId string, data []byte) int {
 }
 
 // SendToSession 发送消息给指定会话
-func (h *Hub) SendToSession(sessionId string, data []byte) bool {
-	if client, ok := h.GetClientBySession(sessionId); ok {
+func (h *Hub) SendToSession(sessionID string, data []byte) bool {
+	if client, ok := h.GetClientBySession(sessionID); ok {
 		return client.Send(data)
 	}
 	return false
 }
 
 // SendToSessionWithTimeout 发送消息给指定会话，带超时
-func (h *Hub) SendToSessionWithTimeout(sessionId string, data []byte, timeout time.Duration) bool {
-	if client, ok := h.GetClientBySession(sessionId); ok {
+func (h *Hub) SendToSessionWithTimeout(sessionID string, data []byte, timeout time.Duration) bool {
+	if client, ok := h.GetClientBySession(sessionID); ok {
 		return client.SendWithTimeout(data, timeout)
 	}
 	return false
 }
 
 // SendToSessionBlocking 阻塞发送消息给指定会话
-func (h *Hub) SendToSessionBlocking(sessionId string, data []byte) bool {
-	if client, ok := h.GetClientBySession(sessionId); ok {
+func (h *Hub) SendToSessionBlocking(sessionID string, data []byte) bool {
+	if client, ok := h.GetClientBySession(sessionID); ok {
 		return client.SendBlocking(data)
 	}
 	return false

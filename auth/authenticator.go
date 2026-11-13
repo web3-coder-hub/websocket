@@ -1,7 +1,9 @@
+// Package auth provides authentication strategies and utilities for WebSocket connections.
 package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -19,20 +21,20 @@ type AuthStrategy interface {
 // Authenticator WebSocket 连接层认证器
 type Authenticator struct {
 	strategy               AuthStrategy
+	logger                 logger.Logger
 	authType               string // 认证类型：空=不认证，token=Token认证，sign=签名认证
 	pendingAuthTimeoutSecs int    // 待认证状态的超时时间（秒）
-	logger                 logger.Logger
 }
 
 // AuthClient 定义可被认证的对象接口
 // 实现此接口的类型可以被 Authenticator 进行认证和授权操作
 type AuthClient interface {
 	// 设置认证信息
-	SetSessionId(sessionId string)
-	SetUserId(userId string)
-	SetAccountId(accountId string)
-	SetClientId(clientId string)
-	SetClientIp(clientIp string)
+	SetSessionID(sessionID string)
+	SetUserID(userID string)
+	SetAccountID(accountID string)
+	SetClientID(clientID string)
+	SetClientIP(clientIP string)
 	SetClientType(clientType string)
 	SetAccountIds(accountIds string)
 	SetAuthDeadline(deadline time.Time)
@@ -42,9 +44,9 @@ type AuthClient interface {
 	GetState() int32
 
 	// 获取认证信息
-	GetClientId() string
+	GetClientID() string
 	GetClientType() string
-	GetClientIp() string
+	GetClientIP() string
 }
 
 // NewAuthenticator 创建认证器实例
@@ -76,9 +78,9 @@ func NewAuthenticator(authType string, strategy AuthStrategy, pendingAuthTimeout
 
 // AuthError 认证错误，包含 HTTP 状态码和业务错误码
 type AuthError struct {
-	StatusCode int
 	Code       string
 	Message    string
+	StatusCode int
 }
 
 func (e *AuthError) Error() string {
@@ -125,5 +127,8 @@ func SendAuthError(w http.ResponseWriter, err error) {
 		"message":   authErr.Message,
 		"timestamp": time.Now().UnixMilli(),
 	}
-	_ = json.NewEncoder(w).Encode(body)
+	// Best effort encode, client will see empty body on encode failure
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		fmt.Printf("json encode error in auth response: %v\n", err)
+	}
 }
