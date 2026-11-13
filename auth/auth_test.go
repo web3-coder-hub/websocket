@@ -85,14 +85,14 @@ func TestAuthenticatorGetters(t *testing.T) {
 	}
 }
 
-// TestGenerateClientId tests client ID generation
-func TestGenerateClientId(t *testing.T) {
+// TestGenerateClientID tests client ID generation
+func TestGenerateClientID(t *testing.T) {
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("User-Agent", "TestAgent/1.0")
 	req.RemoteAddr = "192.168.1.1:12345"
 
-	clientId1 := GenerateClientId(req)
-	clientId2 := GenerateClientId(req)
+	clientId1 := GenerateClientID(req)
+	clientId2 := GenerateClientID(req)
 
 	if clientId1 == "" {
 		t.Error("ClientId should not be empty")
@@ -107,20 +107,20 @@ func TestGenerateClientId(t *testing.T) {
 	req2.Header.Set("User-Agent", "DifferentAgent/1.0")
 	req2.RemoteAddr = "192.168.1.2:12345"
 
-	clientId3 := GenerateClientId(req2)
+	clientId3 := GenerateClientID(req2)
 	if clientId1 == clientId3 {
 		t.Error("Different requests should generate different client IDs")
 	}
 }
 
-// TestGenerateSessionId tests session ID generation
-func TestGenerateSessionId(t *testing.T) {
-	sessionId1 := GenerateSessionId()
+// TestGenerateSessionID tests session ID generation
+func TestGenerateSessionID(t *testing.T) {
+	sessionId1 := GenerateSessionID()
 
 	// Sleep to ensure different timestamp
 	time.Sleep(1 * time.Millisecond)
 
-	sessionId2 := GenerateSessionId()
+	sessionId2 := GenerateSessionID()
 
 	if sessionId1 == "" {
 		t.Error("SessionId should not be empty")
@@ -135,12 +135,12 @@ func TestGenerateSessionId(t *testing.T) {
 	}
 }
 
-// TestGenerateSessionIdFromClientId tests session ID generation from client ID
-func TestGenerateSessionIdFromClientId(t *testing.T) {
+// TestGenerateSessionIDFromClientID tests session ID generation from client ID
+func TestGenerateSessionIDFromClientID(t *testing.T) {
 	clientId := "test-client-123"
 
-	sessionId1 := GenerateSessionIdFromClientId(clientId)
-	sessionId2 := GenerateSessionIdFromClientId(clientId)
+	sessionId1 := GenerateSessionIDFromClientID(clientId)
+	sessionId2 := GenerateSessionIDFromClientID(clientId)
 
 	if sessionId1 == "" {
 		t.Error("SessionId should not be empty")
@@ -151,7 +151,7 @@ func TestGenerateSessionIdFromClientId(t *testing.T) {
 	}
 
 	// Different client ID should generate different session ID
-	sessionId3 := GenerateSessionIdFromClientId("different-client")
+	sessionId3 := GenerateSessionIDFromClientID("different-client")
 	if sessionId1 == sessionId3 {
 		t.Error("Different client IDs should generate different session IDs")
 	}
@@ -389,23 +389,23 @@ func TestGenerateHmacSign(t *testing.T) {
 	}
 }
 
-// BenchmarkGenerateClientId benchmarks client ID generation
-func BenchmarkGenerateClientId(b *testing.B) {
+// BenchmarkGenerateClientID benchmarks client ID generation
+func BenchmarkGenerateClientID(b *testing.B) {
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("User-Agent", "TestAgent/1.0")
 	req.RemoteAddr = "192.168.1.1:12345"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GenerateClientId(req)
+		GenerateClientID(req)
 	}
 }
 
-// BenchmarkGenerateSessionId benchmarks session ID generation
-func BenchmarkGenerateSessionId(b *testing.B) {
+// BenchmarkGenerateSessionID benchmarks session ID generation
+func BenchmarkGenerateSessionID(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GenerateSessionId()
+		GenerateSessionID()
 	}
 }
 
@@ -521,17 +521,17 @@ type mockAuthClient struct {
 	state      int32
 }
 
-func (m *mockAuthClient) SetSessionId(id string)      { m.sessionId = id }
-func (m *mockAuthClient) SetUserId(id string)         { m.userId = id }
-func (m *mockAuthClient) SetAccountId(id string)      { m.accountId = id }
-func (m *mockAuthClient) SetClientId(id string)       { m.clientId = id }
+func (m *mockAuthClient) SetSessionID(id string)      { m.sessionId = id }
+func (m *mockAuthClient) SetUserID(id string)         { m.userId = id }
+func (m *mockAuthClient) SetAccountID(id string)      { m.accountId = id }
+func (m *mockAuthClient) SetClientID(id string)       { m.clientId = id }
 func (m *mockAuthClient) SetClientType(t string)      { m.clientType = t }
-func (m *mockAuthClient) SetClientIp(ip string)       { m.clientIp = ip }
+func (m *mockAuthClient) SetClientIP(ip string)       { m.clientIp = ip }
 func (m *mockAuthClient) SetAccountIds(ids string)    { m.accountIds = ids }
 func (m *mockAuthClient) SetState(state int32)        { m.state = state }
 func (m *mockAuthClient) SetAuthDeadline(t time.Time) {}
 func (m *mockAuthClient) GetState() int32             { return m.state }
-func (m *mockAuthClient) GetClientId() string         { return m.clientId }
+func (m *mockAuthClient) GetClientID() string         { return m.clientId }
 func (m *mockAuthClient) GetClientType() string       { return m.clientType }
-func (m *mockAuthClient) GetClientIp() string         { return m.clientIp }
+func (m *mockAuthClient) GetClientIP() string         { return m.clientIp }
 func (m *mockAuthClient) GetAccountIdsString() string { return m.accountIds }

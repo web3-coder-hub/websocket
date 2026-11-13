@@ -15,9 +15,9 @@ type RequestManager struct {
 
 // pendingRequest 待响应的请求
 type pendingRequest struct {
+	respChan  chan []byte
+	errChan   chan error
 	requestID string
-	respChan  chan []byte // 响应数据通道（容量1，避免阻塞）
-	errChan   chan error  // 错误通道（容量1）
 }
 
 // NewRequestManager 创建请求管理器
@@ -70,7 +70,10 @@ func (rm *RequestManager) NotifyResponse(requestID string, data []byte) bool {
 		return false
 	}
 
-	pr := value.(*pendingRequest)
+	pr, ok := value.(*pendingRequest)
+	if !ok {
+		return false
+	}
 
 	// 拷贝数据，避免底层缓冲区被重用导致并发修改
 	dataCopy := make([]byte, len(data))
@@ -93,7 +96,10 @@ func (rm *RequestManager) NotifyError(requestID string, err error) bool {
 		return false
 	}
 
-	pr := value.(*pendingRequest)
+	pr, ok := value.(*pendingRequest)
+	if !ok {
+		return false
+	}
 
 	select {
 	case pr.errChan <- err:
@@ -111,7 +117,10 @@ func (rm *RequestManager) CancelRequest(requestID string) {
 // ClearAll 清理所有pending请求（用于连接断开等场景）
 func (rm *RequestManager) ClearAll(err error) {
 	rm.pendingRequests.Range(func(key, value interface{}) bool {
-		pr := value.(*pendingRequest)
+		pr, ok := value.(*pendingRequest)
+		if !ok {
+			return true
+		}
 
 		// 通知所有等待的请求
 		select {

@@ -78,3 +78,14 @@ uninstall-hooks:
 	@echo "Uninstalling Git hooks..."
 	@git config --unset core.hooksPath
 	@echo "✅ Git hooks uninstalled"
+
+
+.PHONY: clean-build
+clean-build:
+	rm -rf ./bin/*
+
+.PHONY: build
+build:
+	@echo "Verifying build for all packages..."
+	@go build ./...
+	@echo "✅ Build verification passed"

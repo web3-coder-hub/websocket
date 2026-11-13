@@ -1,3 +1,4 @@
+// Package adapter provides abstraction layer for different WebSocket implementations.
 package adapter
 
 import (
@@ -93,16 +94,16 @@ type ClientAdapter interface {
 
 // UpgradeOptions 服务端升级选项
 type UpgradeOptions struct {
+	Subprotocols    []string
 	ReadBufferSize  int
 	WriteBufferSize int
-	Subprotocols    []string
 }
 
 // DialOptions 客户端连接选项
 type DialOptions struct {
+	TLSConfig        interface{}
+	Subprotocols     []string
 	ReadBufferSize   int
 	WriteBufferSize  int
 	HandshakeTimeout time.Duration
-	Subprotocols     []string
-	TLSConfig        interface{} // *tls.Config
 }

@@ -94,16 +94,16 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 		return false, errors.New("token parse function not set")
 	}
 
-	clientId := client.GetClientId()
-	clientIp := client.GetClientIp()
+	clientID := client.GetClientID()
+	clientIP := client.GetClientIP()
 
 	// 解析 Token
-	userId, accountId, clientType, _, err := s.parseTokenFunc(token, s.cache, s.logger)
+	userID, accountID, clientType, _, err := s.parseTokenFunc(token, s.cache, s.logger)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("token validation failed",
 				logger.Field{Key: "error", Value: err.Error()},
-				logger.Field{Key: "remoteAddr", Value: clientIp},
+				logger.Field{Key: "remoteAddr", Value: clientIP},
 			)
 		}
 		return false, errors.New(constant.GetErrorMessage(constant.ErrCodeAuthFailed))
@@ -119,17 +119,17 @@ func (s *TokenAuthStrategy) Authenticate(r *http.Request, client AuthClient) (au
 
 	// 设置认证信息
 	client.SetAccountIds(accountIds)
-	client.SetUserId(userId)
-	client.SetAccountId(accountId)
+	client.SetUserID(userID)
+	client.SetAccountID(accountID)
 	client.SetClientType(clientType)
-	client.SetSessionId(sha256Hex(clientType + "-" + clientId))
+	client.SetSessionID(sha256Hex(clientType + "-" + clientID))
 	client.SetState(int32(constant.StateAuthenticated))
 
 	if s.logger != nil {
 		s.logger.Info("websocket auth success",
-			logger.Field{Key: "userId", Value: userId},
-			logger.Field{Key: "sessionId", Value: sha256Hex(clientType + "-" + clientId)},
-			logger.Field{Key: "clientIp", Value: clientIp},
+			logger.Field{Key: "userId", Value: userID},
+			logger.Field{Key: "sessionId", Value: sha256Hex(clientType + "-" + clientID)},
+			logger.Field{Key: "clientIp", Value: clientIP},
 		)
 	}
 
@@ -146,23 +146,23 @@ func (s *TokenAuthStrategy) Verify(credential string, client AuthClient) error {
 		return errors.New("token parse function not set")
 	}
 
-	userId, accountId, clientType, _, err := s.parseTokenFunc(credential, s.cache, s.logger)
+	userID, accountID, clientType, _, err := s.parseTokenFunc(credential, s.cache, s.logger)
 	if err != nil {
 		return err
 	}
 
 	// 更新客户端认证信息
-	if userId != "" {
-		client.SetUserId(userId)
+	if userID != "" {
+		client.SetUserID(userID)
 	}
-	if accountId != "" {
-		client.SetAccountId(accountId)
+	if accountID != "" {
+		client.SetAccountID(accountID)
 	}
 	if clientType != "" {
 		client.SetClientType(clientType)
 		// 根据新的 ClientType 重新生成 SessionId
-		clientId := client.GetClientId()
-		client.SetSessionId(sha256Hex(clientType + "-" + clientId))
+		clientID := client.GetClientID()
+		client.SetSessionID(sha256Hex(clientType + "-" + clientID))
 	}
 
 	// 设置为已认证状态
@@ -191,7 +191,7 @@ func (s *TokenAuthStrategy) GetAccountIdsHeader() string {
 // ParseJWT 解码 JWT payload（不校验签名）- 泛型版本
 // T: JWT content 字段的类型
 // 返回: content 数据、exp 时间戳（秒，0 表示无过期）、错误
-func ParseJWT[T any](token string) (*T, int64, error) {
+func ParseJWT[T any](token string) (content *T, exp int64, err error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, 0, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))

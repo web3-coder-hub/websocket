@@ -1,89 +1,24 @@
 # golangci-lint
 version: "2"
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  # govet:
-  govet:
-    enable-all: true
-    disable:
-      - shadow
-      - fieldalignment
-
-  # revive
-  revive:
-    confidence: 0.8
-    enable-all-rules: false
-    rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: if-return
-      - name: increment-decrement
-      - name: var-declaration
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unreachable-code
-      - name: redefines-builtin-id
-
-  # gocritic
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
-    disabled-checks:
-      - whyNoLint
-      - hugeParam
-
-  # staticcheck
-  staticcheck:
-    checks: ["all"]
-
-  # unused
-  unused:
-    check-exported: false
-
-  # gosec
-  gosec:
-    excludes:
-      - G104
-    config:
-      # G306
-      G306: "0644"
+run:
+  timeout: 5m
+  tests: false
+  modules-download-mode: readonly
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
-
     - ineffassign
     - unused
-
     - gocritic
-
     - gosec
-
     - misspell
     - nakedret
     - prealloc
-
-    # Go module
-    - gomoddirectives
 
   disable:
     - exhaustive
@@ -93,75 +28,110 @@ linters:
     - funlen
     - gocognit
     - lll
+    - gomoddirectives
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    govet:
+      enable-all: true
+      disable:
+        - shadow
+
+    revive:
+      confidence: 0.8
+      enable-all-rules: false
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - opinionated
+        - performance
+        - style
+      disabled-checks:
+        - whyNoLint
+        - hugeParam
+
+    staticcheck:
+      checks: ["all"]
+
+    unused:
+      check-exported: false
+
+    gosec:
+      excludes:
+        - G104
+      config:
+        G306: "0644"
+
+  exclusions:
+    # Completely ignore all reports from these paths
+    paths:
+      - examples
+      - vendor
+      - third_party
+      - bin
+      - _docs
+      - pkg/types
+      - generated
+      - ".*\\.pb\\.go$"
+      - ".*_gen\\.go$"
+      - "wire_gen\\.go$"
+
+    rules:
+      # Disable some linters on test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - gocritic
+
+      # Additionally disable some linters in examples directory
+      - path: examples/
+        linters:
+          - errcheck
+          - gosec
+          - gocritic
+
+      # Allow local replacements in go.mod
+      - linters:
+          - gomoddirectives
+        text: "local replacement are not allowed"
+
+      # Code generation tools are expected to trigger G304
+      - path: cmd/converter/
+        text: "G304"
+      - path: cmd/servicegen/
+        text: "G304"
 
 issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - gocritic
-
-    # Code generation tools - G304 is expected for file operations
-    - path: cmd/converter/
-      text: "G304"
-
-    - path: cmd/servicegen/
-      text: "G304"
-
-    - path: \.pb\.go$
-      linters:
-        - all
-
-    - path: _gen\.go$
-      linters:
-        - all
-
-    - path: generated/
-      linters:
-        - all
-
-    - path: wire_gen\.go$
-      linters:
-        - all
-
-    - path: wire_gen\.go$
-      linters:
-        - gocyclo
-        - gocognit
-        - funlen
-
-    - path: \.pb\.go$
-      linters:
-        - lll
-
-  exclude-dirs:
-    - bin
-    - _docs
-    - third_party
-    - vendor
-
-  exclude-files:
-    - ".*\\.pb\\.go$"
-    - ".*_gen\\.go$"
-    - "wire_gen\\.go$"
-
   max-same-issues: 0
-
   max-issues-per-linter: 0
-
   uniq-by-line: true
-
-run:
-  timeout: 5m
-
-  tests: false
-
-  modules-download-mode: readonly
 
 output:
   print-issued-lines: true
-
   print-linter-name: true
-
   sort-results: true

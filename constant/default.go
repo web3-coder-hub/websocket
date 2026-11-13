@@ -1,3 +1,4 @@
+// Package constant defines constants for WebSocket events, states, and error codes.
 package constant
 
 const (
